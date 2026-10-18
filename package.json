@@ -1,0 +1,33 @@
+{
+  "name": "dsh-eng-protocol",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Event-driven engineering protocol guidance for DeepSeek Harness: compiles skills into decision cards, judges them at the moment of action, and shows every trigger in the transcript and on a dashboard.",
+  "main": "index.js",
+  "scripts": {
+    "test": "node tests/smoke.mjs && node tests/compiler.mjs && node tests/integration.mjs && node tests/client.mjs && node tests/scenarios.mjs && node tests/regressions.mjs && node tests/adaptive.mjs && node tests/catalog.mjs && node tests/dashboard-browser.mjs"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web"
+    }
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "cordis",
+    "plugin",
+    "skills",
+    "decision-cards"
+  ],
+  "license": "MIT"
+}

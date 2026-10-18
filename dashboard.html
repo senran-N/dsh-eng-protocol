@@ -1,0 +1,1150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Eng Protocol</title>
+<script>
+(function(){var t=new URLSearchParams(location.search).get('theme'); if(t==='dark'||t==='light') document.documentElement.dataset.theme=t;})();
+</script>
+<link rel="stylesheet" href="__DASHBOARD_CSS__">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.6-3 8.4-7 10-4-1.6-7-5.4-7-10V6z"/><path d="M8.5 12.2l2.4 2.3 4.6-4.8"/></svg></div>
+      <div>
+        <h1>Eng Protocol <span id="mode"></span></h1>
+        <div class="project"><span>项目</span><select id="project" aria-label="切换项目"></select></div>
+      </div>
+    </div>
+    <div class="tools">
+      <button class="btn icon quiet" id="auto" aria-pressed="true" title="自动刷新：开" aria-label="自动刷新"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></svg></button>
+      <button class="btn icon quiet" id="theme" title="切换明暗" aria-label="切换明暗"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg></button>
+      <button class="btn standalone" id="close">关闭</button>
+    </div>
+  </header>
+
+  <nav class="nav" role="tablist" aria-label="面板">
+    <button role="tab" data-view="overview" aria-selected="true">概览</button>
+    <button role="tab" data-view="trail" aria-selected="false">记录 <span class="count" id="n-trail"></span></button>
+    <button role="tab" data-view="cards" aria-selected="false">规则 <span class="count" id="n-cards"></span></button>
+    <button role="tab" data-view="skills" aria-selected="false">Skills <span class="count" id="n-skills"></span><span class="alert" id="skills-alert" hidden></span></button>
+    <button role="tab" data-view="topology" aria-selected="false">关系图</button>
+    <button role="tab" data-view="settings" aria-selected="false">设置</button>
+  </nav>
+
+  <!-- ===== 概览 ===== -->
+  <section class="view active" id="view-overview" role="tabpanel">
+    <div class="hero" id="hero" data-tone="good">
+      <div class="orb" id="hero-orb"></div>
+      <div>
+        <h2 id="hero-title">正在读取…</h2>
+        <p id="hero-text"></p>
+        <div class="hero-actions" id="hero-actions"></div>
+      </div>
+    </div>
+    <div class="kpis">
+      <div class="kpi k-rules"><div class="l"><i></i>生效的规则</div><div class="n" id="k-total">0</div><div class="h" id="k-total-h"></div></div>
+      <div class="kpi k-remind"><div class="l"><i></i>提醒</div><div class="n" id="k-inject">0</div><div class="h">AI 准备做事时收到的提醒</div></div>
+      <div class="kpi k-block"><div class="l"><i></i>拦下</div><div class="n" id="k-block">0</div><div class="h">危险或越界的操作先停一下</div></div>
+      <div class="kpi k-follow"><div class="l"><i></i>提醒后照做</div><div class="n" id="k-follow">—</div><div class="h" id="k-follow-h"></div></div>
+      <div class="kpi"><div class="l"><i></i>平均每次检查</div><div class="n" id="k-lat">—</div><div class="h" id="k-lat-h"></div></div>
+    </div>
+    <div class="kpinote" id="kpinote"></div>
+
+    <div class="card">
+      <div class="card-head"><h2>活动</h2><span class="aside" id="activitymeta"></span></div>
+      <div class="activity">
+        <figure class="chart">
+          <div class="charthead">
+            <figcaption>什么时候检查过</figcaption>
+            <div class="keys" id="legend-time"></div>
+            <button class="btn sm quiet toggle" data-table="time" aria-pressed="false">表格</button>
+          </div>
+          <div id="chart-time"></div>
+          <div class="tableview" id="table-time" hidden></div>
+        </figure>
+        <figure class="chart">
+          <div class="charthead">
+            <figcaption>因为什么检查</figcaption>
+            <button class="btn sm quiet toggle" data-table="trigger" aria-pressed="false">表格</button>
+          </div>
+          <div id="chart-trigger"></div>
+          <div class="tableview" id="table-trigger" hidden></div>
+          <div class="caption" id="boundaries"></div>
+        </figure>
+      </div>
+    </div>
+
+    <div class="cols" style="margin-top:14px">
+      <div class="card">
+        <div class="card-head"><h2>最近的提醒</h2><span class="aside"><button class="linkbtn" data-goto="trail">全部记录</button></span></div>
+        <ul class="timeline" id="recent"></ul>
+        <div class="empty" id="recent-empty" hidden>还没有提醒过。需要的时候，提醒会出现在这里。</div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h2>Skill 准备情况</h2><span class="aside"><button class="linkbtn" data-goto="skills">查看详情</button></span></div>
+        <div class="card-body" id="overview-compile"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 记录 ===== -->
+  <section class="view" id="view-trail" role="tabpanel">
+    <div class="card">
+      <div class="filters">
+        <select id="f-boundary" aria-label="按时机筛选">
+          <option value="">全部时机</option><option value="request">回答前</option><option value="tool">动手前</option><option value="settle">交付前</option>
+        </select>
+        <select id="f-outcome" aria-label="按结果筛选">
+          <option value="">全部结果</option><option value="injected">提醒了</option><option value="blocked">拦下了</option>
+          <option value="shadow">影子模式·本会提醒</option><option value="failed">出错</option><option value="quiet">没提醒</option>
+        </select>
+        <select id="f-session" aria-label="按会话筛选"><option value="">全部会话</option></select>
+        <input id="f-query" type="search" placeholder="搜索规则或原因…" aria-label="搜索记录">
+        <span class="count" id="trail-count"></span>
+      </div>
+      <ul class="timeline" id="trail"></ul>
+      <div class="empty" id="trail-empty" hidden>还没有记录。AI 回答前、动手改东西前和交付前都会检查一次，结果会出现在这里。</div>
+      <div class="more"><button class="btn sm" id="trail-more" hidden>加载更早的记录</button></div>
+    </div>
+  </section>
+
+  <!-- ===== 规则 ===== -->
+  <section class="view" id="view-cards" role="tabpanel">
+    <div class="card">
+      <div class="filters">
+        <div class="chips" id="card-chips" role="group" aria-label="规则类型">
+          <button class="chip" data-filter="all" aria-pressed="true">全部</button>
+          <button class="chip" data-filter="builtin" aria-pressed="false">通用</button>
+          <button class="chip" data-filter="skill" aria-pressed="false">来自 skill</button>
+          <button class="chip" data-filter="critical" aria-pressed="false">关键</button>
+          <button class="chip" data-filter="active" aria-pressed="false">提醒过的</button>
+        </div>
+        <input id="search" type="search" placeholder="搜索规则或 skill…" aria-label="搜索规则">
+        <span class="count" id="count"></span>
+      </div>
+      <div class="scroll">
+        <table class="cardtable">
+          <thead><tr>
+            <th aria-sort="none"><button class="sort" data-sort="title">规则</button></th>
+            <th>来自</th>
+            <th>什么时候检查</th>
+            <th class="num" aria-sort="none"><button class="sort" data-sort="injected">提醒</button></th>
+            <th class="num" aria-sort="none"><button class="sort" data-sort="follow" title="提醒之后 AI 照做的次数 / 能看出结果的次数">照做</button></th>
+            <th aria-sort="none"><button class="sort" data-sort="last">最近</button></th>
+          </tr></thead>
+          <tbody id="cards"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="cards-empty" hidden>没有符合条件的规则。</div>
+    </div>
+  </section>
+
+  <!-- ===== Skills ===== -->
+  <section class="view" id="view-skills" role="tabpanel">
+    <div class="card">
+      <div class="compile-hero">
+        <div>
+          <div class="title" id="compile-title">—</div>
+          <div class="muted" id="compile-sub"></div>
+        </div>
+        <div class="acts">
+          <button class="btn" id="compile-retry" hidden>重试</button>
+          <button class="btn" id="compile-cancel" hidden>暂停</button>
+          <button class="btn" id="rebuild" title="把所有 skill 重新编译成规则（点两次确认）">全部重新编译</button>
+        </div>
+        <div class="meter" id="compile-meter"></div>
+        <div class="legend-row">
+          <span><i style="background:var(--good)"></i>已完成</span>
+          <span><i style="background:color-mix(in srgb, var(--good) 55%, var(--surface-3))"></i>上次做完、这次沿用</span>
+          <span><i style="background:var(--accent)"></i>正在编译</span>
+          <span><i style="background:var(--warn)"></i>稍后再试</span>
+          <span><i style="background:var(--bad)"></i>失败</span>
+          <span><i style="background:var(--surface-3)"></i>等待</span>
+        </div>
+      </div>
+      <div class="skill-grid" id="skills"></div>
+      <div class="empty" id="skills-empty" hidden>这个项目还没有 skill。</div>
+    </div>
+    <div class="card">
+      <div class="card-head"><h2>过程</h2><span class="aside">最近的编译经过</span></div>
+      <ul class="log" id="compile-log"></ul>
+      <div class="empty" id="compile-log-empty" hidden>还没有编译过程可看。</div>
+    </div>
+  </section>
+
+  <!-- ===== 关系图 ===== -->
+  <section class="view" id="view-topology" role="tabpanel">
+    <div class="card">
+      <div class="legend"><label>只看 <select id="graph-skill" aria-label="只看某个 Skill"><option value="">全部 Skill</option></select></label><span id="graphmeta" class="faint"></span></div>
+      <div class="graphwrap" id="graphwrap"><svg id="graph" role="img" aria-label="规则关系图"></svg></div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--viz-quiet)"></i>通用规则</span>
+        <span><i class="dot" style="background:var(--viz-1)"></i>skill 规则（大点是 skill 总则）</span>
+        <span><i class="line"></i>先后顺序</span>
+        <span><i class="line contains"></i>属于这个 skill</span>
+        <span><i class="line covers"></i>与通用规则相同</span>
+        <span><i class="line merge"></i>互相参考</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== 设置 ===== -->
+  <section class="view" id="view-settings" role="tabpanel">
+    <div id="settings-body"><div class="empty">正在读取设置…</div></div>
+  </section>
+</div>
+
+<dialog id="detail" aria-labelledby="detail-title">
+  <div class="dlg">
+    <button class="btn icon quiet close" id="detail-close" aria-label="关闭">✕</button>
+    <h3 id="detail-title"></h3>
+    <div class="meta" id="detail-meta"></div>
+    <div id="detail-body"></div>
+    <h4>最近几次检查</h4>
+    <div id="detail-history"></div>
+  </div>
+</dialog>
+<div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+<div class="toast" id="banner" role="status"></div>
+
+<script>
+(function(){
+  'use strict';
+  var params = new URLSearchParams(location.search);
+  var EMBED = params.get('embed') === '1';
+  var CAN_LINK = EMBED && params.get('trajectory') === '1' && window.parent !== window;
+  if(EMBED) document.body.classList.add('embed');
+
+  // ---- vocabulary -------------------------------------------------------------
+  var BOUNDARY = { request: '回答前', tool: '动手前', settle: '交付前' };
+  var OUTCOME = { injected: ['提醒了', 'sel'], blocked: ['拦下了', 'warn'], shadow: ['影子模式·本会提醒', 'plain'], failed: ['出错', 'bad'], quiet: ['没提醒', 'plain'] };
+  var STATE = { needed: ['需要提醒', 'warn'], addressing: ['正在做', 'sel'], satisfied: ['已做到', 'ok'], inapplicable: ['不相关', 'plain'], unknown: ['看不出来', 'plain'] };
+  var STATE_ORDER = { needed: 0, addressing: 1, unknown: 2, satisfied: 3, inapplicable: 4 };
+  var RESULT = { selected: '提醒了', cooldown: '刚提醒过，先不重复', limit: '—', prerequisite: '要先完成前一步', confidence: '把握不够，没提醒', covered: '已有相同的提醒', scope: '这个 skill 与当前任务无关', state: '—' };
+  var TRIGGER = {
+    turn: '新的请求', read: '读文件', edit: '改代码', first_edit: '第一次改代码', test_edit: '改测试',
+    check_start: '开始跑检查', checked: '检查跑完', failed: '出错', stuck: '反复出错', dependency: '涉及依赖',
+    untrusted: '可疑内容', skill: '用到 skill', settle: '准备交付', heartbeat: '定期复查', risky: '危险操作',
+    research: '查资料', delegate: '交给子任务',
+  };
+  var ACTION = { edit: '改', read: '读', command: '运行', skill: '用 skill', research: '查', delegate: '交给子任务', other: '调用' };
+  var SKILL_STATE = { cached: ['已就绪', 'ok'], done: ['已就绪', 'ok'], queued: ['等待中', 'plain'], compiling: ['编译中', 'sel'], retrying: ['稍后再试', 'warn'], failed: ['没准备好', 'bad'], cancelled: ['已暂停', 'warn'] };
+  var TIME_SERIES = [
+    { key: 'delivered', label: '提醒或拦下', color: 'var(--viz-1)' },
+    { key: 'shadow', label: '影子模式下本会提醒', color: 'var(--viz-2)' },
+    { key: 'none', label: '没提醒', color: 'var(--viz-quiet)' },
+  ];
+  var ICON = {
+    ok: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.2 4.2L19 7"/></svg>',
+    warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 7v6"/><path d="M12 17h.01"/></svg>',
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 4a8 8 0 1 1-8 8"/></svg>',
+    off: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 12h12"/></svg>',
+  };
+  var MINUTE = 60000;
+  var STEPS = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080].map(function(m){ return m * MINUTE; });
+  var SVGNS = 'http://www.w3.org/2000/svg';
+
+  var state = {
+    data: null, signature: '', cwd: params.get('cwd') || '',
+    scope: params.get('scope') === 'project' ? 'project' : 'session',
+    sessionId: params.get('sessionId') || '',
+    view: 'overview', graphDirty: true,
+    cardFilter: 'all', cardQuery: '', sort: { key: '', dir: -1 }, cardsById: new Map(),
+    trail: { items: [], total: 0, signature: '', expanded: new Set() },
+    recent: { signature: '' },
+    tables: { time: false, trigger: false }, historyFor: '', auto: true, updatedAt: 0,
+    settings: null, catalog: { providers: null, models: {}, info: {} },
+  };
+
+  // ---- helpers ----------------------------------------------------------------
+  var $ = function(id){ return document.getElementById(id); };
+  function esc(value){ return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[ch]; }); }
+  function api(path){ var base = (state.data && state.data.config && state.data.config.dashboard && state.data.config.dashboard.path) || location.pathname.replace(/\/+$/, '') || '/eng-protocol'; return base + path; }
+  function num(n){ return Number(n || 0).toLocaleString('zh-CN'); }
+  function pad2(n){ return String(n).padStart(2, '0'); }
+  function shortDate(value){ if(!value) return '—'; var d = new Date(value); if(isNaN(d)) return String(value); return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+  function clock(ms){ var d = new Date(ms); return pad2(d.getHours()) + ':' + pad2(d.getMinutes()); }
+  function ago(value){
+    var t = Date.parse(value); if(!isFinite(t)) return '—';
+    var s = Math.round((Date.now() - t) / 1000);
+    if(s < 45) return '刚刚'; if(s < 3600) return Math.round(s / 60) + ' 分钟前'; if(s < 86400) return Math.round(s / 3600) + ' 小时前';
+    return shortDate(value);
+  }
+  function pill(text, cls){ return '<span class="pill ' + (cls || '') + '">' + esc(text) + '</span>'; }
+  function trig(name){ return TRIGGER[name] || name; }
+  function trigs(list){ return (list || []).map(trig).join('、'); }
+  function seconds(ms){ ms = Number(ms) || 0; return ms < 1000 ? (ms ? '不到 1 秒' : '—') : (ms < 10000 ? (ms / 1000).toFixed(1) : String(Math.round(ms / 1000))) + ' 秒'; }
+  function duration(ms){ if(!(ms > 0)) return ''; var s = Math.max(1, Math.round(ms / 1000)); if(s < 60) return s + ' 秒'; var m = Math.round(s / 60); return m < 60 ? m + ' 分钟' : Math.floor(m / 60) + ' 小时' + (m % 60 ? ' ' + (m % 60) + ' 分' : ''); }
+  function until(value){ var ms = Date.parse(value) - Date.now(); return ms > 0 ? duration(ms) + '后' : '马上'; }
+  function percent(value){ return typeof value === 'number' ? Math.round(value * 100) + '%' : '—'; }
+  function folder(path){ var parts = String(path || '').split(/[\\/]/).filter(Boolean); return parts.length ? parts[parts.length - 1] : String(path || ''); }
+  function cardTitle(id){ var card = state.cardsById.get(id); return card ? card.title : id; }
+  function followTotal(b){ return b ? (b.resolved || 0) + (b.persisting || 0) : 0; }
+  function rate(b){ var t = followTotal(b); return t ? Math.round(b.resolved / t * 100) + '%' : '—'; }
+  function ratio(b){ var t = followTotal(b); return t ? b.resolved + '/' + t : '—'; }
+  function keyOf(r){ return r.decisionId || [r.ts, r.sessionId, r.boundary, r.step].join('|'); }
+  function outcomeOf(r){ if(r.blocked) return 'blocked'; if(r.injected) return 'injected'; if(r.shadow && (r.wouldInject || r.wouldBlock)) return 'shadow'; if(r.error) return 'failed'; return 'quiet'; }
+  // `C:/skills/x/SKILL.md#body:L3-L9` reads as "x/SKILL.md 第 3–9 行附近".
+  function sourceText(card){
+    var ref = card.sourceRef, path = String((ref && ref.path) || card.source || '').split('#')[0];
+    var short = path.split(/[\\/]/).filter(Boolean).slice(-2).join('/');
+    if(!ref || !ref.startLine) return short || path;
+    var lines = ref.startLine === ref.endLine ? '第 ' + ref.startLine + ' 行' : '第 ' + ref.startLine + '–' + ref.endLine + ' 行';
+    return short + ' ' + lines + (ref.precise ? '' : '附近');
+  }
+  function svg(tag, attrs){ var n = document.createElementNS(SVGNS, tag); Object.keys(attrs || {}).forEach(function(k){ n.setAttribute(k, attrs[k]); }); return n; }
+  function svgText(attrs, content){ var n = svg('text', attrs); n.textContent = content; return n; }
+  function node(tag, className, content){ var el = document.createElement(tag); if(className) el.className = className; if(content != null) el.textContent = content; return el; }
+  function message(error){ return error && error.message ? error.message : String(error); }
+  async function getJson(url){
+    var response = await fetch(url, { credentials: 'same-origin', cache: 'no-store' });
+    var data = await response.json();
+    if(!response.ok || !data.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    return data;
+  }
+  async function postJson(path, body){
+    var response = await fetch(api(path), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Object.assign({ sessionId: state.sessionId, cwd: state.cwd, scope: state.scope }, body)) });
+    var data = await response.json();
+    if(!response.ok || !data.ok) throw new Error(data.error || ('HTTP ' + response.status));
+    return data;
+  }
+  function identityQuery(){
+    var q = new URLSearchParams();
+    if(state.scope === 'project'){ q.set('scope', 'project'); if(state.cwd) q.set('cwd', state.cwd); if(state.sessionId) q.set('sessionId', state.sessionId); }
+    else if(state.sessionId) q.set('sessionId', state.sessionId);
+    return q;
+  }
+  var toastTimer = null;
+  function toast(text, level){
+    var el = $('banner');
+    el.textContent = text; el.className = 'toast show' + (level === 'bad' ? ' bad' : '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ el.className = 'toast'; }, level === 'bad' ? 7000 : 3200);
+  }
+  function columnPath(x, y, w, h, r){ r = Math.min(r, w / 2, h); return 'M' + x + ',' + (y + h) + 'V' + (y + r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + r) + ',' + y + 'H' + (x + w - r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + w) + ',' + (y + r) + 'V' + (y + h) + 'Z'; }
+  function barPath(x, y, w, h, r){ r = Math.min(r, h / 2, w); return 'M' + x + ',' + y + 'H' + (x + w - r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + w) + ',' + (y + r) + 'V' + (y + h - r) + 'A' + r + ',' + r + ' 0 0 1 ' + (x + w - r) + ',' + (y + h) + 'H' + x + 'Z'; }
+  function niceTicks(max){
+    var raw = Math.max(1, max) / 3, exp = Math.pow(10, Math.floor(Math.log10(raw))), f = raw / exp;
+    var step = Math.max(1, (f <= 1 ? 1 : f <= 2 ? 2 : f <= 5 ? 5 : 10) * exp), ticks = [];
+    for(var v = 0; v < Math.max(1, max) + step; v += step) ticks.push(v);
+    return ticks;
+  }
+  // Open one step in the host's Trajectory view (only inside a DSH session tab).
+  function trajectoryLink(callId, label){
+    if(!CAN_LINK) return '';
+    return '<button class="linkbtn" data-trajectory="' + esc(callId || '') + '">' + esc(label || '在轨迹中查看') + '</button>';
+  }
+  document.addEventListener('click', function(event){
+    var link = event.target.closest('[data-trajectory]');
+    if(link){ event.stopPropagation(); window.parent.postMessage({ type: 'eng-protocol/open-trajectory', callId: link.dataset.trajectory }, location.origin); return; }
+    var go = event.target.closest('[data-goto]');
+    if(go) switchView(go.dataset.goto);
+  }, true);
+
+  // ---- tooltip -------------------------------------------------------------------
+  var tip = $('tooltip');
+  function showTip(content, anchor){
+    tip.replaceChildren();
+    tip.appendChild(node('div', 'tt-title', content.title));
+    (content.rows || []).forEach(function(row){
+      var line = node('div', 'tt-row');
+      if(row.color){ var key = node('i', 'tt-key'); key.style.background = row.color; line.appendChild(key); }
+      line.appendChild(node('strong', '', row.value)); line.appendChild(node('span', 'tt-label', row.label));
+      tip.appendChild(line);
+    });
+    (content.notes || []).forEach(function(n){ tip.appendChild(node('div', 'tt-note', n)); });
+    tip.hidden = false;
+    var rect = anchor.getBoundingClientRect();
+    tip.style.left = Math.min(window.innerWidth - tip.offsetWidth - 8, Math.max(8, rect.left + rect.width / 2 - tip.offsetWidth / 2)) + 'px';
+    var top = rect.top - tip.offsetHeight - 8; tip.style.top = (top < 8 ? rect.bottom + 8 : top) + 'px';
+  }
+  function hideTip(){ tip.hidden = true; }
+  function hoverable(target, group, content){
+    var on = function(){ group.classList.add('hovering'); target.classList.add('on'); showTip(content(), target); };
+    var off = function(){ group.classList.remove('hovering'); target.classList.remove('on'); hideTip(); };
+    target.addEventListener('pointerenter', on); target.addEventListener('pointerleave', off);
+    target.addEventListener('focus', on); target.addEventListener('blur', off);
+  }
+
+  // ---- loading -------------------------------------------------------------------
+  function signatureOf(d){
+    var c = d.compile || {};
+    return JSON.stringify([d.cwd, d.graph.revision, d.totals.decisions, d.totals.lastAt, c.updatedAt, c.running, c.summary, (c.log || []).length, d.skills.length, d.projects, d.config]);
+  }
+  async function loadStats(){
+    try{
+      var data = await getJson(api('/api/stats') + '?' + identityQuery());
+      var signature = signatureOf(data);
+      state.data = data; state.cwd = data.cwd; state.updatedAt = Date.now();
+      if(signature !== state.signature){ state.signature = signature; render(); }
+      renderNote();
+    }catch(error){ toast('读不到数据：' + message(error), 'bad'); }
+  }
+  function trailUrl(limit, offset, extra){
+    var q = identityQuery();
+    [['boundary', 'f-boundary'], ['outcome', 'f-outcome'], ['session', 'f-session']].forEach(function(p){ var v = $(p[1]).value; if(v) q.set(p[0], v); });
+    var text = $('f-query').value.trim(); if(text) q.set('q', text);
+    Object.keys(extra || {}).forEach(function(k){ q.set(k, extra[k]); });
+    q.set('limit', String(limit)); q.set('offset', String(offset));
+    return api('/api/decisions') + '?' + q;
+  }
+  async function loadTrail(options){
+    options = options || {};
+    var trail = state.trail, offset = options.append ? trail.items.length : 0;
+    var limit = options.append ? 50 : Math.max(50, options.quiet ? trail.items.length : 0);
+    try{
+      var data = await getJson(trailUrl(limit, offset));
+      var items = options.append ? trail.items.concat(data.items) : data.items;
+      var sig = [data.total, items.length, items[0] ? keyOf(items[0]) : '', items.filter(function(i){ return i.after; }).length].join('|');
+      trail.total = data.total;
+      if(!options.quiet || sig !== trail.signature){ trail.items = items; trail.signature = sig; renderTrail(); }
+    }catch(error){ toast('读不到记录：' + message(error), 'bad'); }
+  }
+  // The overview shows the latest reminders and blocks, not every quiet check.
+  async function loadRecent(){
+    try{
+      var q = identityQuery(); q.set('limit', '120');
+      var data = await getJson(api('/api/decisions') + '?' + q);
+      var items = data.items.filter(function(r){ var o = outcomeOf(r); return o === 'injected' || o === 'blocked' || o === 'shadow' || o === 'failed'; }).slice(0, 6);
+      var sig = items.map(keyOf).join(',') + items.filter(function(i){ return i.after; }).length;
+      if(sig === state.recent.signature) return;
+      state.recent.signature = sig;
+      var list = $('recent'); list.replaceChildren();
+      items.forEach(function(r){ list.appendChild(decisionItem(r, state.recent)); });
+      $('recent-empty').hidden = items.length > 0;
+    }catch(error){ /* the stats load already reports a broken connection */ }
+  }
+  function tick(){
+    if(!state.auto || document.hidden) return;
+    loadStats();
+    if(state.view === 'overview') loadRecent();
+    if(state.view === 'trail') loadTrail({ quiet: true });
+  }
+
+  // ---- overview --------------------------------------------------------------------
+  function problemSkills(c){ return Object.keys((c && c.skills) || {}).filter(function(n){ return c.skills[n].state === 'failed'; }); }
+  function render(){
+    var d = state.data; if(!d) return;
+    state.cardsById = new Map(d.graph.cards.map(function(card){ return [card.id, card]; }));
+    document.title = 'Eng Protocol · ' + folder(d.cwd);
+    var mode = d.config.enabled === false ? ['已关闭', 'plain'] : d.config.shadow ? ['影子模式', 'warn'] : ['守护中', 'ok'];
+    $('mode').innerHTML = '<span class="pill mode ' + mode[1] + '">' + mode[0] + '</span>';
+    renderProjects(); renderHero(); renderKpis(); renderActivity(); renderSessions();
+    renderCards(); renderSkills(); renderOverviewCompile();
+    $('n-cards').textContent = num(d.graph.cards.length);
+    $('n-skills').textContent = d.skills.length ? num(d.skills.length) : '';
+    $('n-trail').textContent = d.totals.decisions ? num(d.totals.decisions) : '';
+    $('skills-alert').hidden = problemSkills(d.compile).length === 0;
+    state.graphDirty = true;
+    if(state.view === 'topology') renderGraph();
+  }
+  function renderProjects(){
+    var d = state.data, select = $('project');
+    select.replaceChildren();
+    (d.projects && d.projects.length ? d.projects : [d.cwd]).forEach(function(cwd){ var o = node('option', '', folder(cwd)); o.value = cwd; o.title = cwd; o.selected = cwd === d.cwd; select.appendChild(o); });
+    select.title = d.cwd;
+  }
+  function renderHero(){
+    var d = state.data, c = d.compile || {}, t = d.totals, problems = problemSkills(c);
+    var tone = 'good', title = '一切正常', text = '', actions = '';
+    var activity = t.decisions
+      ? '最近检查了 ' + num(t.decisions) + ' 次，提醒 ' + num(t.injected) + ' 次' + (t.blocked ? '，拦下 ' + num(t.blocked) + ' 次危险或越界的操作' : '') + '。'
+      : '还没有检查记录。AI 开始工作后，需要提醒的时候会提醒它。';
+    if(d.config.enabled === false){ tone = 'off'; title = '已关闭'; text = '现在不会检查，也不会提醒。'; }
+    else if(problems.length){
+      tone = 'bad'; title = problems.length + ' 个 skill 没准备好';
+      var first = c.skills[problems[0]];
+      text = problems[0] + '：' + (first.hint || '编译失败') + ' 其余规则照常工作。';
+      actions = '<button class="btn primary" id="hero-retry">重试</button><button class="btn" data-goto="skills">查看详情</button>';
+    } else if(c.running){
+      tone = 'info'; title = '正在准备 skill';
+      text = c.summary + '。准备期间，已有的规则照常工作。';
+      actions = '<button class="btn" data-goto="skills">看进度</button>';
+    } else if(d.config.shadow){
+      tone = 'warn'; title = '影子模式：只观察，不打扰'; text = '照常检查和记录，但不提醒、不拦下，用来和正常模式对比效果。' + activity;
+    } else {
+      text = (d.skills.length ? d.skills.length + ' 个 skill 已就绪，' : '') + '共 ' + num(d.graph.cards.length) + ' 条规则在守护。' + activity;
+    }
+    var hero = $('hero'); hero.dataset.tone = tone;
+    $('hero-orb').innerHTML = ICON[tone === 'good' ? 'ok' : tone === 'bad' || tone === 'warn' ? 'warn' : tone === 'off' ? 'off' : 'info'];
+    $('hero-title').textContent = title;
+    $('hero-text').textContent = text;
+    $('hero-actions').innerHTML = actions;
+    var retry = $('hero-retry');
+    if(retry) retry.addEventListener('click', function(){ compileAction('retry', undefined, retry); });
+  }
+  function renderKpis(){
+    var d = state.data, follow = d.totals.followUp || {};
+    $('k-total').textContent = num(d.graph.cards.length);
+    $('k-total-h').textContent = d.skills.length ? '来自 ' + num(d.skills.length) + ' 个 skill，另有 ' + num(d.graph.builtins) + ' 条通用' : num(d.graph.builtins) + ' 条通用规则';
+    $('k-inject').textContent = num(d.totals.injected);
+    $('k-block').textContent = num(d.totals.blocked);
+    $('k-follow').textContent = rate(follow.live);
+    $('k-follow-h').textContent = followTotal(follow.shadow) ? '不提醒时自己做到 ' + rate(follow.shadow) : followTotal(follow.live) ? '共 ' + ratio(follow.live) + ' 次' : '提醒之后才能看出来';
+    $('k-lat').textContent = d.totals.decisions ? seconds(d.totals.avgLatencyMs) : '—';
+    $('k-lat-h').textContent = d.totals.failed ? '其中 ' + num(d.totals.failed) + ' 次出错' : (d.totals.decisions ? '没有出错' : '');
+    $('k-lat-h').className = 'h' + (d.totals.failed ? ' bad' : '');
+  }
+  function renderNote(){
+    var d = state.data; if(!d) return;
+    $('kpinote').textContent = (d.totals.decisions ? '统计最近 ' + num(d.totals.decisions) + ' 次检查' : '') + (d.totals.decisions ? ' · ' : '') + clock(state.updatedAt) + ' 更新' + (state.auto ? '' : ' · 自动刷新已暂停');
+  }
+
+  // ---- activity charts ---------------------------------------------------------------
+  function bucketize(series){
+    var points = series.map(function(p){ return { t: Date.parse(p.t), o: p.o, e: p.e, l: p.l }; }).filter(function(p){ return isFinite(p.t); });
+    if(!points.length) return null;
+    var first = Infinity, last = -Infinity;
+    points.forEach(function(p){ first = Math.min(first, p.t); last = Math.max(last, p.t); });
+    var step = STEPS.find(function(s){ return (last - first) / s <= 30; }) || STEPS[STEPS.length - 1];
+    var offset = new Date(last).getTimezoneOffset() * MINUTE;
+    var end = Math.floor((last - offset) / step) * step + offset + step;
+    var start = Math.min(Math.floor((first - offset) / step) * step + offset, end - 12 * step);
+    var count = Math.round((end - start) / step), buckets = [];
+    for(var i = 0; i < count; i++) buckets.push({ start: start + i * step, end: start + (i + 1) * step, delivered: 0, shadow: 0, none: 0, failed: 0, latency: 0, n: 0 });
+    points.forEach(function(p){
+      var b = buckets[Math.min(count - 1, Math.floor((p.t - start) / step))];
+      b[p.o === 'injected' || p.o === 'blocked' ? 'delivered' : p.o === 'shadow' ? 'shadow' : 'none'] += 1;
+      b.n += 1; b.latency += p.l || 0; if(p.e) b.failed += 1;
+    });
+    return { step: step, buckets: buckets };
+  }
+  function timeLabel(ms, step, withDate){
+    var d = new Date(ms), day = pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()), time = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+    if(step >= 1440 * MINUTE) return day;
+    return withDate ? day + ' ' + time : time;
+  }
+  function rangeLabel(b, step){
+    var sameDay = new Date(b.start).toDateString() === new Date(b.end - 1).toDateString();
+    return timeLabel(b.start, step, true) + ' – ' + (sameDay && step < 1440 * MINUTE ? timeLabel(b.end, step, false) : timeLabel(b.end, step, true));
+  }
+  function renderTimeChart(series){
+    var box = $('chart-time'), data = bucketize(series);
+    var keys = $('legend-time'); keys.replaceChildren();
+    TIME_SERIES.forEach(function(s){ var k = node('span', 'key'); var sw = node('i', 'swatch'); sw.style.background = s.color; k.appendChild(sw); k.appendChild(document.createTextNode(s.label)); keys.appendChild(k); });
+    box.replaceChildren();
+    renderTimeTable(data);
+    if(!data){ box.appendChild(node('div', 'empty', '还没有检查记录。')); return; }
+    var width = Math.max(260, box.clientWidth || 560), height = 188;
+    var pad = { l: 30, r: 4, t: 8, b: 24 }, plotW = width - pad.l - pad.r, plotH = height - pad.t - pad.b;
+    var max = 0; data.buckets.forEach(function(b){ max = Math.max(max, b.n); });
+    var ticks = niceTicks(max), top = ticks[ticks.length - 1], baseline = pad.t + plotH;
+    var root = svg('svg', { class: 'viz', viewBox: '0 0 ' + width + ' ' + height, width: width, height: height, role: 'img', 'aria-label': '每段时间的检查次数' });
+    ticks.forEach(function(v){
+      var y = baseline - v / top * plotH;
+      root.appendChild(svg('line', { x1: pad.l, x2: width - pad.r, y1: y, y2: y, class: v === 0 ? 'axis' : 'grid' }));
+      root.appendChild(svgText({ x: pad.l - 6, y: y + 3, class: 'tick', 'text-anchor': 'end' }, num(v)));
+    });
+    var band = plotW / data.buckets.length, barW = Math.max(3, Math.min(22, band * 0.6));
+    data.buckets.forEach(function(b, i){
+      var x = pad.l + i * band + (band - barW) / 2;
+      var g = svg('g', { class: 'col', tabindex: b.n ? '0' : '-1', 'aria-label': rangeLabel(b, data.step) + '：' + b.n + ' 次检查' });
+      g.appendChild(svg('rect', { class: 'hit', x: pad.l + i * band, y: pad.t, width: band, height: plotH }));
+      var drawn = TIME_SERIES.filter(function(s){ return b[s.key] > 0; }), below = 0;
+      drawn.forEach(function(s, pos){
+        var y0 = baseline - below / top * plotH; below += b[s.key];
+        var y1 = baseline - below / top * plotH, h = y0 - y1 - (pos > 0 ? 2 : 0);
+        if(h < 0.6) return;
+        g.appendChild(svg('path', { class: 'mark', fill: s.color, d: pos === drawn.length - 1 ? columnPath(x, y1, barW, h, 4) : 'M' + x + ',' + y1 + 'h' + barW + 'v' + h + 'h' + (-barW) + 'Z' }));
+      });
+      hoverable(g, root, function(){
+        return { title: rangeLabel(b, data.step), rows: TIME_SERIES.map(function(s){ return { value: num(b[s.key]), label: s.label, color: s.color }; }),
+          notes: [b.failed ? '其中出错 ' + b.failed + ' 次' : '', b.n ? '平均每次 ' + seconds(b.latency / b.n) : ''].filter(Boolean) };
+      });
+      root.appendChild(g);
+    });
+    var every = Math.max(1, Math.ceil(data.buckets.length / 5)), lastDay = '';
+    data.buckets.forEach(function(b, i){
+      if(i % every) return;
+      var day = new Date(b.start).toDateString();
+      root.appendChild(svgText({ x: pad.l + i * band + band / 2, y: height - 7, class: 'tick', 'text-anchor': i === 0 ? 'start' : 'middle' }, timeLabel(b.start, data.step, day !== lastDay)));
+      lastDay = day;
+    });
+    box.appendChild(root);
+  }
+  function renderTimeTable(data){
+    var box = $('table-time');
+    if(!data){ box.innerHTML = '<div class="empty">还没有检查记录。</div>'; return; }
+    box.innerHTML = '<table><thead><tr><th>时间段</th>' + TIME_SERIES.map(function(s){ return '<th class="num">' + esc(s.label) + '</th>'; }).join('') + '<th class="num">出错</th><th class="num">平均每次</th></tr></thead><tbody>'
+      + data.buckets.filter(function(b){ return b.n > 0; }).reverse().map(function(b){
+          return '<tr><td>' + esc(rangeLabel(b, data.step)) + '</td>' + TIME_SERIES.map(function(s){ return '<td class="num">' + num(b[s.key]) + '</td>'; }).join('') + '<td class="num">' + num(b.failed) + '</td><td class="num">' + esc(seconds(b.latency / b.n)) + '</td></tr>';
+        }).join('') + '</tbody></table>';
+  }
+  function renderTriggerChart(totals){
+    var box = $('chart-trigger'), decisions = totals.decisions || 0;
+    var entries = Object.keys(totals.byTrigger || {}).map(function(k){ return [k, totals.byTrigger[k]]; }).sort(function(a, b){ return b[1] - a[1] || (a[0] < b[0] ? -1 : 1); });
+    box.replaceChildren();
+    $('table-trigger').innerHTML = entries.length
+      ? '<table><thead><tr><th>情况</th><th class="num">次数</th><th class="num">占比</th></tr></thead><tbody>' + entries.map(function(e){ return '<tr><td>' + esc(trig(e[0])) + '</td><td class="num">' + num(e[1]) + '</td><td class="num">' + (decisions ? Math.round(e[1] / decisions * 100) + '%' : '—') + '</td></tr>'; }).join('') + '</tbody></table>'
+      : '<div class="empty">还没有检查记录。</div>';
+    if(!entries.length){ box.appendChild(node('div', 'empty', '还没有检查记录。')); return; }
+    var shown = entries.slice(0, 8), row = 23, barH = 11, labelW = 92, valueW = 38;
+    var width = Math.max(220, box.clientWidth || 320), height = shown.length * row + 4, max = shown[0][1];
+    var root = svg('svg', { class: 'viz', viewBox: '0 0 ' + width + ' ' + height, width: width, height: height, role: 'img', 'aria-label': '每种情况引发的检查次数' });
+    shown.forEach(function(e, i){
+      var y = 2 + i * row, barY = y + (row - barH) / 2, w = Math.max(3, e[1] / max * (width - labelW - valueW));
+      var g = svg('g', { class: 'col', tabindex: '0', 'aria-label': trig(e[0]) + '：' + e[1] + ' 次' });
+      g.appendChild(svg('rect', { class: 'hit', x: 0, y: y, width: width, height: row }));
+      g.appendChild(svgText({ x: labelW - 10, y: barY + barH - 1, class: 'cat', 'text-anchor': 'end' }, trig(e[0])));
+      g.appendChild(svg('path', { class: 'mark', fill: 'var(--viz-1)', d: barPath(labelW, barY, w, barH, 4) }));
+      g.appendChild(svgText({ x: labelW + w + 6, y: barY + barH - 1, class: 'val' }, num(e[1])));
+      hoverable(g, root, function(){ return { title: trig(e[0]), rows: [{ value: num(e[1]), label: '次检查因此发起' }], notes: decisions ? ['占全部检查的 ' + Math.round(e[1] / decisions * 100) + '%'] : [] }; });
+      root.appendChild(g);
+    });
+    box.appendChild(root);
+    if(entries.length > shown.length) box.appendChild(node('div', 'caption', '另有 ' + (entries.length - shown.length) + ' 种情况，见表格'));
+  }
+  function renderActivity(){
+    var d = state.data, series = d.series || [], by = d.totals.byBoundary || {};
+    $('activitymeta').textContent = series.length ? '最近 ' + num(series.length) + ' 次检查' : '';
+    renderTimeChart(series); renderTriggerChart(d.totals);
+    $('boundaries').textContent = ['request', 'tool', 'settle'].map(function(b){ return BOUNDARY[b] + ' ' + num(by[b] || 0) + ' 次'; }).join(' · ');
+    ['time', 'trigger'].forEach(function(name){
+      var asTable = state.tables[name];
+      $('chart-' + name).hidden = asTable; $('table-' + name).hidden = !asTable;
+      if(name === 'time') $('legend-time').hidden = asTable;
+      document.querySelector('[data-table="' + name + '"]').setAttribute('aria-pressed', asTable ? 'true' : 'false');
+    });
+  }
+
+  // ---- records ----------------------------------------------------------------------
+  function renderSessions(){
+    var select = $('f-session'), current = select.value, counts = new Map();
+    (state.data.series || []).forEach(function(p){ if(p.s) counts.set(p.s, (counts.get(p.s) || 0) + 1); });
+    select.replaceChildren(node('option', '', '全部会话')); select.firstChild.value = '';
+    Array.from(counts.keys()).reverse().forEach(function(id){
+      var o = node('option', '', '会话 ' + (id.length > 10 ? id.slice(0, 8) + '…' : id) + ' · ' + counts.get(id) + ' 次');
+      o.value = id; o.selected = id === current; select.appendChild(o);
+    });
+  }
+  // One line in plain words: when, where, what happened, and why.
+  function headline(r){
+    var o = outcomeOf(r), titles = (r.selected || []).map(function(id){ return '「' + cardTitle(id) + '」'; });
+    if(o === 'blocked') return '拦下了一步操作' + (titles.length ? '：' + titles.join('') : '');
+    if(o === 'injected') return '提醒了' + titles.join('');
+    if(o === 'shadow') return (r.wouldBlock ? '本会拦下' : '本会提醒') + titles.join('');
+    if(o === 'failed') return String(r.error || '检查出错').split('：')[0];
+    return '一切正常';
+  }
+  function why(r){
+    var a = r.assessments || {}, first = (r.selected || [])[0];
+    if(first && a[first] && a[first].reason) return a[first].reason;
+    if(outcomeOf(r) === 'failed') return String(r.error || '').split('：').slice(1).join('：');
+    return '';
+  }
+  function stepsHtml(after){
+    if(!after) return '';
+    var actions = after.actions || [];
+    var html = '<h4>之后 AI 做了什么</h4>';
+    if(!actions.length && !after.reply) return html + '<div class="muted">' + (after.ended === 'new-turn' ? '这一轮没有再动手，就结束了。' : '还在等它的下一步。') + '</div>';
+    if(after.reply) html += '<div class="reply">“' + esc(after.reply) + '”</div>';
+    if(actions.length){
+      html += '<ul class="steps" style="margin-top:6px">' + actions.map(function(a){
+        var mark = { ok: '✓', error: '✕', blocked: '■', running: '…' }[a.status] || '·';
+        var label = a.status === 'blocked' ? '被拦下的这一步' : (ACTION[a.kind] || '调用') + (a.kind === 'other' ? ' ' + a.tool : '');
+        return '<li><span class="si ' + esc(a.status) + '">' + mark + '</span><span class="st" title="' + esc(a.target || a.tool) + '"><b>' + esc(label) + '</b>' + esc(a.target || a.tool || '') + '</span>' + trajectoryLink(a.callId, '轨迹') + '</li>';
+      }).join('') + '</ul>';
+    }
+    return html;
+  }
+  function assessmentTable(rows){
+    return '<div class="scroll"><table class="assess"><thead><tr><th>规则</th><th>判断</th><th class="num">把握</th><th>结果</th><th>原因</th></tr></thead><tbody>'
+      + rows.map(function(row){
+          var label = STATE[row.a.state] || [row.a.state || '—', 'plain'], result = RESULT[row.r.kind] || '—';
+          if(row.r.kind === 'prerequisite' && row.r.by) result = '要先完成「' + cardTitle(row.r.by) + '」';
+          return '<tr' + (row.picked ? ' class="picked"' : '') + '><td title="' + esc(row.id) + '">' + esc(cardTitle(row.id)) + '</td><td>' + pill(label[0], label[1]) + '</td><td class="num">' + esc(percent(row.a.confidence)) + '</td><td>' + esc(result) + '</td><td class="reason">' + esc(row.a.reason || '—') + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+  }
+  function decisionDetail(r){
+    var meta = [];
+    if(r.turn != null) meta.push('第 ' + esc(r.turn) + ' 轮对话');
+    if(r.triggers && r.triggers.length) meta.push('因为' + esc(trigs(r.triggers)));
+    meta.push('用时 ' + esc(seconds(r.latencyMs)));
+    if(r.model) meta.push('<span title="检查用的模型">' + esc(r.model) + '</span>');
+    var flags = (r.preset && r.preset.length ? pill('危险操作，默认先拦下', 'warn') : '') + (r.cleared && r.cleared.length ? pill('用户已明确同意，放行', 'ok') : '');
+    var html = '<div class="muted" style="font-size:12px">' + meta.join(' · ') + (flags ? ' ' + flags : '') + (r.callId ? ' · ' + trajectoryLink(r.callId) : '') + '</div>';
+    if(r.error) html += '<div class="err" style="margin-top:6px">' + esc(r.error) + '</div>';
+    html += stepsHtml(r.after);
+    var selected = r.selected || [], as = r.assessments || {}, reasons = r.reasons || {};
+    var rows = (r.candidates || []).map(function(id){ return { id: id, a: as[id] || {}, r: reasons[id] || {}, picked: selected.indexOf(id) >= 0 }; });
+    var rank = function(s){ return STATE_ORDER[s] == null ? 9 : STATE_ORDER[s]; };
+    rows.sort(function(x, y){ return Number(y.picked) - Number(x.picked) || rank(x.a.state) - rank(y.a.state) || (y.a.confidence || 0) - (x.a.confidence || 0); });
+    if(!rows.length) return html;
+    var relevant = rows.filter(function(row){ return row.picked || ['needed', 'addressing', 'unknown'].indexOf(row.a.state) >= 0; });
+    var rest = rows.filter(function(row){ return relevant.indexOf(row) < 0; });
+    html += '<h4>这次看了哪些规则</h4>' + (relevant.length ? assessmentTable(relevant) : '<div class="muted">所有规则都已做到或与当前任务无关。</div>');
+    if(rest.length) html += '<details style="margin-top:6px"><summary>另外 ' + num(rest.length) + ' 条已做到或不相关</summary>' + assessmentTable(rest) + '</details>';
+    return html;
+  }
+  function decisionItem(r, owner){
+    owner = owner || state.trail;
+    var key = keyOf(r), o = outcomeOf(r), open = owner.expanded && owner.expanded.has(key);
+    var li = node('li', 'ev' + (open ? ' open' : '')); li.dataset.o = o;
+    var reason = why(r);
+    li.innerHTML = '<span class="dot"></span><button class="ev-row" aria-expanded="' + (open ? 'true' : 'false') + '">'
+      + '<div class="ev-top"><span class="ev-when" title="' + esc(shortDate(r.ts)) + '">' + esc(ago(r.ts)) + '</span>'
+      + '<span class="ev-title">' + esc(BOUNDARY[r.boundary] || '') + ' · ' + esc(headline(r)) + '</span>'
+      + '<span class="ev-meta">' + (r.after && (r.after.actions || []).length ? '<span>之后 ' + r.after.actions.length + ' 步</span>' : '') + '<span>' + esc(trigs(r.triggers)) + '</span><span>' + esc(seconds(r.latencyMs)) + '</span></span></div>'
+      + (reason ? '<div class="ev-why">' + esc(reason) + '</div>' : '') + '</button>';
+    var detail = node('div', 'ev-detail'); detail.hidden = !open;
+    if(open) detail.innerHTML = decisionDetail(r);
+    li.appendChild(detail);
+    li.querySelector('.ev-row').addEventListener('click', function(){
+      owner.expanded = owner.expanded || new Set();
+      var expand = !owner.expanded.has(key);
+      if(expand) owner.expanded.add(key); else owner.expanded.delete(key);
+      li.classList.toggle('open', expand);
+      this.setAttribute('aria-expanded', expand ? 'true' : 'false');
+      if(expand) detail.innerHTML = decisionDetail(r);
+      detail.hidden = !expand;
+    });
+    return li;
+  }
+  function renderTrail(){
+    var trail = state.trail, list = $('trail');
+    list.replaceChildren();
+    trail.items.forEach(function(r){ list.appendChild(decisionItem(r)); });
+    $('trail-empty').hidden = trail.items.length > 0;
+    $('trail-count').textContent = trail.total ? '共 ' + num(trail.total) + ' 条' + (trail.total > trail.items.length ? '，显示 ' + num(trail.items.length) + ' 条' : '') : '';
+    $('trail-more').hidden = trail.items.length >= trail.total;
+  }
+
+  // ---- rules --------------------------------------------------------------------------
+  var SORTERS = {
+    title: function(c){ return c.title; },
+    injected: function(c){ return (c.stats || {}).injected || 0; },
+    follow: function(c){ var l = ((c.stats || {}).followUp || {}).live, t = followTotal(l); return t ? l.resolved / t : -1; },
+    last: function(c){ return Date.parse((c.stats || {}).lastAt) || 0; },
+  };
+  function cardList(){
+    var query = state.cardQuery.trim().toLowerCase(), f = state.cardFilter;
+    var cards = state.data.graph.cards.filter(function(c){
+      if(f === 'builtin' && c.skill) return false;
+      if(f === 'skill' && !c.skill) return false;
+      if(f === 'critical' && !c.critical) return false;
+      if(f === 'active' && !((c.stats || {}).selected > 0)) return false;
+      return !query || [c.id, c.title, c.skill, c.when, trigs(c.triggers)].join(' ').toLowerCase().indexOf(query) >= 0;
+    });
+    var key = state.sort.key, dir = state.sort.dir;
+    if(!key) return cards;
+    var value = SORTERS[key], order = new Map(cards.map(function(c, i){ return [c, i]; }));
+    return cards.slice().sort(function(a, b){ var x = value(a), y = value(b); var diff = typeof x === 'string' ? x.localeCompare(y, 'zh-CN') : x - y; return diff * dir || order.get(a) - order.get(b); });
+  }
+  function renderCards(){
+    var cards = cardList(), body = $('cards');
+    $('count').textContent = cards.length === state.data.graph.cards.length ? '共 ' + cards.length + ' 条' : cards.length + ' / ' + state.data.graph.cards.length + ' 条';
+    body.replaceChildren();
+    cards.forEach(function(c){
+      var s = c.stats || {}, row = document.createElement('tr');
+      row.className = 'clickable'; row.tabIndex = 0;
+      row.innerHTML = '<td class="title-cell"><b title="' + esc(c.id) + '">' + esc(c.title) + '</b>' + (c.critical || c.entry ? '<div class="sub">' + (c.critical ? '关键规则' : '') + (c.entry ? 'skill 总则：判断这个 skill 用不用得上' : '') + '</div>' : '') + '</td>'
+        + '<td>' + (c.skill ? pill(c.skill, 'sel') : pill('通用', 'plain')) + '</td>'
+        + '<td><div class="tags">' + (c.triggers || []).map(function(t){ return pill(trig(t), 'plain'); }).join('') + '</div></td>'
+        + '<td class="num">' + num(s.injected) + '</td><td class="num muted">' + esc(ratio(s.followUp && s.followUp.live)) + '</td><td class="muted">' + esc(s.lastAt ? ago(s.lastAt) : '—') + '</td>';
+      row.addEventListener('click', function(){ openCard(c.id); });
+      row.addEventListener('keydown', function(e){ if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openCard(c.id); } });
+      body.appendChild(row);
+    });
+    $('cards-empty').hidden = cards.length > 0;
+    document.querySelectorAll('.cardtable th').forEach(function(th){ var b = th.querySelector('.sort'); if(b) th.setAttribute('aria-sort', b.dataset.sort === state.sort.key ? (state.sort.dir > 0 ? 'ascending' : 'descending') : 'none'); });
+    document.querySelectorAll('#card-chips .chip').forEach(function(chip){ chip.setAttribute('aria-pressed', chip.dataset.filter === state.cardFilter ? 'true' : 'false'); });
+  }
+
+  // ---- skills & compile ------------------------------------------------------------------
+  async function compileAction(action, name, button){
+    if(button) button.disabled = true;
+    try{
+      await postJson('/api/compile', { action: action, name: name });
+      toast(action === 'cancel' ? '已暂停。做完的部分都保存了。' : action === 'retry' ? '正在重试，上次做完的部分不会重做。' : (name ? '正在重新编译 ' + name : '正在重新编译全部 skill') + '，期间旧规则照常工作。');
+      setTimeout(loadStats, 500);
+    }catch(error){ toast('没能开始：' + message(error), 'bad'); }
+    finally{ if(button) button.disabled = false; }
+  }
+  // Every skill's body as a bar of parts; cached skills are one solid "ready" bar.
+  function docBar(entry){
+    var segs = entry && entry.segments, length = entry && entry.length;
+    if(!segs || !segs.length || !length){
+      var s = !entry || entry.state === 'cached' || entry.state === 'done' ? 'done' : entry.state === 'failed' ? 'failed' : entry.state === 'compiling' ? 'compiling' : entry.state === 'retrying' ? 'retrying' : 'pending';
+      return '<div class="docbar"><i data-s="' + s + '"></i></div>';
+    }
+    return '<div class="docbar" aria-hidden="true">' + segs.map(function(g){ return '<i data-s="' + esc(g.state) + '" style="flex-grow:' + Math.max(1, Math.round((g.to - g.from) / length * 1000)) + '" title="' + esc({ done: '已完成', resumed: '上次做完、这次沿用', compiling: '正在编译', retrying: '稍后再试', failed: '失败', pending: '等待' }[g.state] || g.state) + '"></i>'; }).join('') + '</div>';
+  }
+  function skillHint(e){
+    if(!e) return '';
+    if(e.state === 'failed') return '<div class="sk-hint bad">' + esc(e.hint || '编译失败') + (e.nextRetryAt ? ' ' + esc(until(e.nextRetryAt)) + '会自动再试。' : '') + (e.stale ? ' 在此之前仍用旧版规则。' : '') + '</div>'
+      + (e.error ? '<details><summary>详细错误</summary><div class="err">' + esc(e.error) + '</div></details>' : '');
+    if(e.state === 'retrying') return '<div class="sk-hint">' + esc(e.hint || '暂时失败') + (e.retryInMs ? '（' + esc(duration(e.retryInMs)) + '后再试）' : '') + '</div>';
+    if(e.state === 'compiling') return '<div class="sk-hint">' + (e.parts > 1 ? '分 ' + e.parts + ' 段处理，已完成 ' + (e.partsDone || 0) + ' 段' : '正在编译') + (e.resumedParts ? '，其中 ' + e.resumedParts + ' 段沿用上次' : '') + '</div>';
+    if(e.state === 'queued') return '<div class="sk-hint">' + (e.resumable ? '上次做了一部分，会接着做' : '排队中') + '</div>';
+    if(e.state === 'cancelled') return '<div class="sk-hint">已暂停，点“继续”从中断处接着做</div>';
+    return '';
+  }
+  function renderSkills(){
+    var d = state.data, c = d.compile || {}, entries = c.skills || {}, grid = $('skills');
+    var byName = new Map(d.skills.map(function(s){ return [s.name, s]; }));
+    var names = Array.from(new Set(Object.keys(entries).concat(d.skills.map(function(s){ return s.name; }))));
+    var order = { failed: 0, retrying: 1, compiling: 2, queued: 3, cancelled: 4, done: 5, cached: 6 };
+    names.sort(function(a, b){ var x = (entries[a] || {}).state || 'cached', y = (entries[b] || {}).state || 'cached'; return (order[x] - order[y]) || a.localeCompare(b); });
+    var ready = names.filter(function(n){ var s = (entries[n] || { state: 'cached' }).state; return s === 'cached' || s === 'done'; }).length;
+    var failed = names.filter(function(n){ return (entries[n] || {}).state === 'failed'; }).length;
+    var working = names.length - ready - failed;
+    $('compile-title').textContent = c.summary || (names.length ? names.length + ' 个 skill 全部就绪' : '这个项目没有 skill');
+    var sub = [];
+    if(c.finishedAt && !c.running) sub.push('上次编译于 ' + ago(c.finishedAt));
+    if(c.running && c.startedAt) sub.push('开始于 ' + ago(c.startedAt));
+    $('compile-sub').textContent = sub.join(' · ');
+    var total = Math.max(1, names.length);
+    $('compile-meter').innerHTML = '<i class="m-ready" style="width:' + (ready / total * 100) + '%"></i><i class="m-work" style="width:' + (working / total * 100) + '%"></i><i class="m-bad" style="width:' + (failed / total * 100) + '%"></i>';
+    $('compile-retry').hidden = !(failed > 0 || c.cancelled);
+    $('compile-retry').textContent = c.cancelled ? '继续' : '重试没准备好的';
+    $('compile-cancel').hidden = !c.running;
+    grid.replaceChildren();
+    names.forEach(function(name){
+      var e = entries[name] || { state: 'cached' }, skill = byName.get(name) || {}, label = SKILL_STATE[e.state] || [e.state, 'plain'];
+      if(skill.stale && e.state !== 'failed') label = ['更新中，暂用旧版', 'warn'];
+      var el = node('div', 'sk'); el.dataset.state = e.state;
+      var meta = [];
+      if(skill.cards) meta.push(num(skill.cards) + ' 条规则');
+      if(e.state === 'done' && e.durationMs) meta.push('用时 ' + duration(e.durationMs));
+      else if(skill.compiledAt) meta.push('更新于 ' + ago(skill.compiledAt));
+      if(skill.invocation && skill.invocation.modelInvocable === false) meta.push('需明确调用');
+      el.innerHTML = '<div class="sk-top"><b title="' + esc(name) + '">' + esc(name) + '</b>' + pill(label[0], label[1]) + '</div>'
+        + (skill.description ? '<div class="sk-desc">' + esc(skill.description) + '</div>' : '')
+        + docBar(e) + skillHint(e)
+        + (skill.warnings && skill.warnings.length ? '<details><summary>' + num(skill.warnings.length) + ' 条编译提示</summary><ul style="margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--muted)">' + skill.warnings.map(function(w){ return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></details>' : '')
+        + '<div class="sk-meta">' + meta.map(function(m){ return '<span>' + esc(m) + '</span>'; }).join('')
+        + '<span class="acts">' + (skill.cards ? '<button class="btn sm quiet" data-show>看规则</button>' : '') + '<button class="btn sm" data-recompile>重新编译</button></span></div>';
+      var show = el.querySelector('[data-show]');
+      if(show) show.addEventListener('click', function(){ state.cardFilter = 'skill'; state.cardQuery = name; $('search').value = name; switchView('cards'); renderCards(); });
+      var re = el.querySelector('[data-recompile]');
+      re.addEventListener('click', function(){ compileAction('rebuild', name, re); });
+      grid.appendChild(el);
+    });
+    $('skills-empty').hidden = names.length > 0;
+    var log = (c.log || []).slice().reverse(), list = $('compile-log');
+    list.innerHTML = log.map(function(item){ return '<li data-l="' + esc(item.level || 'info') + '"><time>' + esc(clock(Date.parse(item.at))) + '</time><i></i><span>' + (item.skill ? '<b>' + esc(item.skill) + '</b>' : '') + esc(item.text) + '</span></li>'; }).join('');
+    $('compile-log-empty').hidden = log.length > 0;
+  }
+  function renderOverviewCompile(){
+    var d = state.data, c = d.compile || {}, entries = c.skills || {}, box = $('overview-compile');
+    var interesting = Object.keys(entries).filter(function(n){ return ['failed', 'retrying', 'compiling', 'queued', 'cancelled'].indexOf(entries[n].state) >= 0; }).slice(0, 4);
+    var html = '<div style="font-weight:560">' + esc(c.summary || (d.skills.length ? d.skills.length + ' 个 skill 全部就绪' : '这个项目没有 skill')) + '</div>';
+    if(interesting.length){
+      html += '<div class="stack" style="margin-top:12px">' + interesting.map(function(n){ var e = entries[n], l = SKILL_STATE[e.state] || [e.state, 'plain']; return '<div><div class="sk-top" style="margin-bottom:5px"><b>' + esc(n) + '</b>' + pill(l[0], l[1]) + '</div>' + docBar(e) + '</div>'; }).join('') + '</div>';
+    } else if(d.skills.length){
+      html += '<div class="tags" style="margin-top:10px">' + d.skills.slice(0, 12).map(function(s){ return pill(s.name, s.stale ? 'warn' : 'ok'); }).join('') + (d.skills.length > 12 ? pill('另 ' + (d.skills.length - 12) + ' 个', 'plain') : '') + '</div>';
+    }
+    var last = (c.log || []).slice(-3).reverse();
+    if(last.length) html += '<ul class="log" style="margin:10px -18px -10px">' + last.map(function(item){ return '<li data-l="' + esc(item.level || 'info') + '"><time>' + esc(clock(Date.parse(item.at))) + '</time><i></i><span>' + (item.skill ? '<b>' + esc(item.skill) + '</b>' : '') + esc(item.text) + '</span></li>'; }).join('') + '</ul>';
+    box.innerHTML = html;
+  }
+
+  // ---- topology --------------------------------------------------------------------------
+  function relationClass(type){ return type === 'contains' ? 'contains' : type === 'covers' ? 'covers' : type === 'fuses' || type === 'arbitrates' ? 'merge' : 'order'; }
+  var RELATION = { requires: '要先完成', blocks: '完成后才轮到', covers: '与通用规则相同', arbitrates: '冲突时参考', fuses: '可以合并参考', contains: '属于' };
+  function renderGraph(){
+    var d = state.data, root = $('graph'), wrap = $('graphwrap');
+    state.graphDirty = false; root.replaceChildren();
+    var filter = $('graph-skill'), selected = filter.value;
+    var names = Array.from(new Set(d.graph.cards.filter(function(c){ return c.skill; }).map(function(c){ return c.skill; })));
+    filter.replaceChildren(new Option('全部 Skill', ''));
+    names.forEach(function(n){ filter.appendChild(new Option(n, n)); });
+    filter.value = names.indexOf(selected) >= 0 ? selected : '';
+    var cards = d.graph.cards.filter(function(c){ return !filter.value || !c.skill || c.skill === filter.value; });
+    var visible = new Set(cards.map(function(c){ return c.id; }));
+    var relations = d.graph.relations.filter(function(e){ return visible.has(e.source) && visible.has(e.target); });
+    $('graphmeta').textContent = cards.length + ' 条规则 · ' + relations.length + ' 条关系 · 移上去看关系，点击看详情';
+    var width = Math.max(320, wrap.clientWidth || 860), columns = Math.max(1, Math.floor(width / 240));
+    var skillCount = new Set(cards.filter(function(c){ return c.skill; }).map(function(c){ return c.skill; })).size;
+    var height = 180 + Math.ceil(skillCount / columns) * 210;
+    root.setAttribute('viewBox', '0 0 ' + width + ' ' + height);
+    if(!cards.length){ root.appendChild(svgText({ x: width / 2, y: height / 2, 'text-anchor': 'middle', class: 'center-label' }, '还没有规则')); return; }
+    var points = new Map(), builtins = cards.filter(function(c){ return !c.skill; }), groups = new Map();
+    cards.forEach(function(c){ if(c.skill){ if(!groups.has(c.skill)) groups.set(c.skill, []); groups.get(c.skill).push(c); } });
+    builtins.forEach(function(c, i){ var rowSize = Math.max(4, Math.floor(width / 65)); points.set(c.id, { x: 32 + i % rowSize * (width - 64) / Math.max(1, rowSize - 1), y: 65 + Math.floor(i / rowSize) * 28, card: c }); });
+    var labels = svg('g', {});
+    Array.from(groups.keys()).forEach(function(name, i){
+      var members = groups.get(name), gx = (i % columns + 0.5) * width / columns, gy = 180 + Math.floor(i / columns) * 210 + 80;
+      var entry = members.filter(function(c){ return c.entry; })[0] || members[0], others = members.filter(function(c){ return c !== entry; });
+      points.set(entry.id, { x: gx, y: gy, card: entry });
+      others.forEach(function(c, j){ var a = j / others.length * Math.PI * 2 - Math.PI / 2; points.set(c.id, { x: gx + Math.cos(a) * 60, y: gy + Math.sin(a) * 60, card: c }); });
+      labels.appendChild(svgText({ x: gx, y: gy + 88, 'text-anchor': 'middle', class: 'cluster-label' }, name.length > 28 ? name.slice(0, 27) + '…' : name));
+    });
+    root.appendChild(svgText({ x: width / 2, y: 28, 'text-anchor': 'middle', class: 'center-label' }, '通用规则 ' + builtins.length + ' 条'));
+    var defs = svg('defs', {}), arrow = svg('marker', { id: 'relation-arrow', viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 6, markerHeight: 6, orient: 'auto-start-reverse' });
+    arrow.appendChild(svg('path', { d: 'M 0 0 L 10 5 L 0 10 z', fill: 'var(--muted)' })); defs.appendChild(arrow); root.appendChild(defs);
+    var edges = svg('g', {});
+    relations.forEach(function(e){
+      var a = points.get(e.source), b = points.get(e.target); if(!a || !b) return;
+      var dx = b.x - a.x, dy = b.y - a.y, len = Math.max(1, Math.hypot(dx, dy));
+      var line = svg('line', { class: 'edge ' + relationClass(e.type), x1: a.x.toFixed(1), y1: a.y.toFixed(1), x2: (b.x - dx / len * 10).toFixed(1), y2: (b.y - dy / len * 10).toFixed(1) });
+      if(e.type !== 'contains') line.setAttribute('marker-end', 'url(#relation-arrow)');
+      line.dataset.source = e.source; line.dataset.target = e.target;
+      var t = svg('title', {}); t.textContent = cardTitle(e.source) + ' → ' + (RELATION[e.type] || e.type) + ' → ' + cardTitle(e.target) + (e.reason ? '\n' + e.reason : ''); line.appendChild(t);
+      edges.appendChild(line);
+    });
+    root.appendChild(edges); root.appendChild(labels);
+    points.forEach(function(p, id){
+      var c = p.card, r = c.entry ? 7 : !c.skill ? (c.critical ? 6.5 : 5) : 4.5;
+      var g = svg('g', { class: 'node', tabindex: '0', role: 'button', 'aria-label': c.title });
+      g.appendChild(svg('circle', { class: 'hit', cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: 12 }));
+      g.appendChild(svg('circle', { class: 'dotmark', cx: p.x.toFixed(1), cy: p.y.toFixed(1), r: r, fill: c.skill ? 'var(--viz-1)' : 'var(--viz-quiet)' }));
+      var focus = function(on){
+        edges.querySelectorAll('line').forEach(function(l){ l.classList.toggle('on', on && (l.dataset.source === id || l.dataset.target === id)); });
+        root.classList.toggle('focusing', on); g.classList.toggle('on', on);
+        if(on) showTip({ title: c.title, rows: [{ value: num((c.stats || {}).injected), label: '次提醒' }], notes: [c.skill ? '来自 ' + c.skill : '通用规则', '在这些时候检查：' + trigs(c.triggers)] }, g); else hideTip();
+      };
+      g.addEventListener('pointerenter', function(){ focus(true); }); g.addEventListener('pointerleave', function(){ focus(false); });
+      g.addEventListener('focus', function(){ focus(true); }); g.addEventListener('blur', function(){ focus(false); });
+      g.addEventListener('click', function(){ openCard(id); });
+      g.addEventListener('keydown', function(e){ if(e.key === 'Enter' || e.key === ' '){ e.preventDefault(); openCard(id); } });
+      root.appendChild(g);
+    });
+  }
+  $('graph-skill').addEventListener('change', function(){ if(state.data) renderGraph(); });
+
+  // ---- rule detail ---------------------------------------------------------------------
+  function openCard(id){
+    var c = state.cardsById.get(id); if(!c) return;
+    hideTip();
+    $('detail-title').textContent = c.title;
+    $('detail-meta').innerHTML = (c.skill ? pill('来自 ' + c.skill, 'sel') : pill('通用规则', 'plain')) + (c.entry ? pill('skill 总则', 'plain') : '') + (c.critical ? pill('关键', 'warn') : '');
+    var s = c.stats || {}, f = s.followUp || {};
+    var rel = state.data.graph.relations.filter(function(e){ return (e.source === id || e.target === id) && e.type !== 'contains'; });
+    var relText = function(e){
+      if(e.type === 'requires' || e.type === 'blocks') return e.target === id ? '要先做到「' + cardTitle(e.source) + '」' : '做到之后才轮到「' + cardTitle(e.target) + '」';
+      if(e.type === 'covers') return '与通用规则「' + cardTitle(e.target) + '」说的是同一件事';
+      return '可与「' + cardTitle(e.source === id ? e.target : e.source) + '」互相参考';
+    };
+    var rows = [['什么时候适用', c.when], ['怎样算做到', c.satisfiedWhen], ['不适用', c.notApplicable], ['在这些时候检查', trigs(c.triggers)]];
+    if(c.skill && c.source) rows.push(['出处', sourceText(c)]);
+    // Rule text comes from model-compiled SKILL.md files: every field is escaped.
+    $('detail-body').innerHTML = '<ul class="rules">' + (c.rules || []).map(function(r){ return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>'
+      + '<dl>' + rows.filter(function(r){ return r[1]; }).map(function(r){ return '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>'; }).join('') + '</dl>'
+      + (rel.length ? '<h4>与其他规则的关系</h4><ul style="margin:0;padding-left:18px">' + rel.map(function(e){ return '<li>' + esc(relText(e)) + (e.reason ? '<span class="muted">：' + esc(e.reason) + '</span>' : '') + '</li>'; }).join('') + '</ul>' : '')
+      + '<div class="muted" style="font-size:12px;margin-top:12px">提醒过 ' + num(s.injected) + ' 次' + (followTotal(f.live) ? ' · 提醒后照做 ' + esc(ratio(f.live)) : '') + (followTotal(f.shadow) ? ' · 不提醒时自己做到 ' + esc(ratio(f.shadow)) : '') + (s.lastAt ? ' · 最近一次 ' + esc(ago(s.lastAt)) : '') + '</div>';
+    var dialog = $('detail');
+    if(!dialog.open){ if(typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', ''); }
+    loadCardHistory(id);
+  }
+  async function loadCardHistory(id){
+    var box = $('detail-history'); state.historyFor = id; box.innerHTML = '<div class="muted">读取中…</div>';
+    try{
+      var q = identityQuery(); q.set('card', id); q.set('limit', '20');
+      var data = await getJson(api('/api/decisions') + '?' + q);
+      if(state.historyFor !== id) return;
+      if(!data.items.length){ box.innerHTML = '<div class="muted">最近还没有检查过这条规则。</div>'; return; }
+      box.innerHTML = '<div class="scroll"><table class="assess"><thead><tr><th>时间</th><th>时机</th><th>判断</th><th class="num">把握</th><th>原因</th></tr></thead><tbody>'
+        + data.items.map(function(r){ var a = (r.assessments || {})[id] || {}, l = STATE[a.state] || [a.state || '—', 'plain']; return '<tr' + ((r.selected || []).indexOf(id) >= 0 ? ' class="picked"' : '') + '><td class="muted">' + esc(ago(r.ts)) + '</td><td>' + esc(BOUNDARY[r.boundary] || '—') + '</td><td>' + pill(l[0], l[1]) + '</td><td class="num">' + esc(percent(a.confidence)) + '</td><td class="reason">' + esc(a.reason || '—') + '</td></tr>'; }).join('') + '</tbody></table></div>';
+    }catch(error){ if(state.historyFor === id) box.innerHTML = '<div class="err">' + esc(message(error)) + '</div>'; }
+  }
+
+  // ---- settings ---------------------------------------------------------------------------
+  // Providers, models and reasoning efforts come from DSH's own model catalog.
+  async function catalog(query){
+    var key = new URLSearchParams(query).toString();
+    if(catalog.cache[key]) return catalog.cache[key];
+    var promise = getJson(api('/api/models') + (key ? '?' + key : '')).catch(function(){ return null; });
+    catalog.cache[key] = promise;
+    var value = await promise; if(!value) delete catalog.cache[key];
+    return value;
+  }
+  catalog.cache = {};
+  function option(value, label, selected){ return '<option value="' + esc(value) + '"' + (selected ? ' selected' : '') + '>' + esc(label) + '</option>'; }
+  function seconds2(ms){ return ms == null ? '' : Math.round(ms / 100) / 10; }
+  async function loadSettings(){
+    try{
+      state.settings = await getJson(api('/api/settings') + '?' + identityQuery());
+      await renderSettings();
+    }catch(error){ $('settings-body').innerHTML = '<div class="card"><div class="card-body err">读不到设置：' + esc(message(error)) + '</div></div>'; }
+  }
+  // One model route: provider and model pickers, an effort picker for the chosen model.
+  function routeCard(section, title, values, follow){
+    var used = (state.settings.used || {})[section];
+    return '<div class="card"><div class="card-head"><h2>' + esc(title) + '</h2></div><div class="card-body fields" data-route="' + section + '">'
+      + '<div class="field"><label for="set-' + section + '-provider">服务商</label><span id="slot-' + section + '-provider"></span><div class="hint">' + esc(follow) + '</div></div>'
+      + '<div class="field"><label for="set-' + section + '-model">模型</label><span id="slot-' + section + '-model"></span><div class="modelcard" id="info-' + section + '"></div></div>'
+      + '<div class="field"><label for="set-' + section + '-reasoningEffort">思考强度</label><span id="slot-' + section + '-reasoningEffort"></span><div class="hint" id="effort-hint-' + section + '"></div>' + (used ? '<div class="note">上次调用：' + esc(used) + '</div>' : '') + '</div>'
+      + '<div class="field"><label for="set-' + section + '-timeoutMs">' + (section === 'decision' ? '最多等几秒' : '每段最多等几秒') + '</label><div class="unit"><input id="set-' + section + '-timeoutMs" type="number" min="1" step="any" value="' + esc(seconds2(values.timeoutMs)) + '"><i>秒</i></div><div class="hint">' + (section === 'decision' ? '模型迟迟不回答时，最多等这么久就放弃这次检查' : '超时会自动重试，做完的部分不会重做') + '</div></div>'
+      + '<div class="field"><label for="set-' + section + '-temperature">随机性</label><input id="set-' + section + '-temperature" type="number" min="0" max="2" step="0.1" value="' + esc(values.temperature) + '"><div class="hint">0–2，越低越稳定</div></div>'
+      + (section === 'decision' ? '<div class="field"><label for="set-decision-cacheTtlMs">相同情况几秒内不重复检查</label><div class="unit"><input id="set-decision-cacheTtlMs" type="number" min="0" step="any" value="' + esc(seconds2(values.cacheTtlMs)) + '"><i>秒</i></div></div>' : '')
+      + (section === 'compiler' ? '<label class="switch"><input type="checkbox" id="set-compiler-systemAsUser"' + (values.systemAsUser ? ' checked' : '') + '>把系统指令并入用户消息（有的模型服务会报“Incorrect role information”，开着就不会）</label>' : '')
+      + '</div></div>';
+  }
+  async function fillRoute(section, values, followLabel){
+    var providers = await catalog({});
+    var pSlot = $('slot-' + section + '-provider'), mSlot = $('slot-' + section + '-model');
+    var provider = values.provider == null ? '' : values.provider;
+    if(providers && providers.providers && providers.providers.length){
+      var ids = providers.providers.map(function(p){ return p.id; });
+      pSlot.innerHTML = '<select id="set-' + section + '-provider">' + option('', followLabel, !provider)
+        + providers.providers.map(function(p){ return option(p.id, p.name && p.name !== p.id ? p.name + '（' + p.id + '）' : p.id, p.id === provider); }).join('')
+        + (provider && ids.indexOf(provider) < 0 ? option(provider, provider + '（DSH 里找不到）', true) : '') + '</select>';
+    } else {
+      pSlot.innerHTML = '<input id="set-' + section + '-provider" type="text" value="' + esc(provider) + '" placeholder="例如 deepseek-account">';
+    }
+    var fillModels = async function(p, current){
+      if(!p){ mSlot.innerHTML = '<select id="set-' + section + '-model" disabled>' + option('', followLabel, true) + '</select>'; await fillEffort(section, '', '', values.reasoningEffort); return; }
+      var listed = await catalog({ provider: p });
+      var models = listed && listed.models || [];
+      if(models.length){
+        var has = models.some(function(m){ return m.id === current; });
+        mSlot.innerHTML = '<select id="set-' + section + '-model">' + (!current || !has ? option(current || '', current ? current + '（列表里没有）' : '请选择模型', true) : '')
+          + models.map(function(m){ return option(m.id, m.name && m.name !== m.id ? m.name + ' · ' + m.id : m.id, m.id === current); }).join('') + '</select>';
+      } else {
+        mSlot.innerHTML = '<input id="set-' + section + '-model" type="text" value="' + esc(current || '') + '" placeholder="模型 id">';
+      }
+      var mEl = $('set-' + section + '-model');
+      mEl.addEventListener('change', function(){ fillEffort(section, p, mEl.value, $('set-' + section + '-reasoningEffort') ? $('set-' + section + '-reasoningEffort').value : values.reasoningEffort); });
+      await fillEffort(section, p, current, values.reasoningEffort);
+    };
+    var pEl = $('set-' + section + '-provider');
+    pEl.addEventListener('change', function(){ fillModels(pEl.value, ''); });
+    await fillModels(provider, values.model == null ? '' : values.model);
+  }
+  async function fillEffort(section, provider, model, current){
+    var slot = $('slot-' + section + '-reasoningEffort'), hint = $('effort-hint-' + section), info = $('info-' + section);
+    current = current || '';
+    var data = provider && model ? await catalog({ provider: provider, model: model }) : null;
+    info.innerHTML = data ? [data.contextWindow ? '上下文 ' + Math.round(data.contextWindow / 1000) + 'k' : '', data.efforts.length ? '可选思考强度 ' + data.efforts.length + ' 档' : '不支持思考强度', data.description || ''].filter(Boolean).map(function(t){ return '<span>' + esc(t) + '</span>'; }).join('') : '';
+    if(data){
+      var ids = data.efforts.map(function(e){ return e.id; });
+      var html = '<select id="set-' + section + '-reasoningEffort">' + option('', '模型默认' + (data.defaultEffort ? '（' + data.defaultEffort + '）' : ''), !current)
+        + data.efforts.map(function(e){ return option(e.id, e.name && e.name !== e.id ? e.name + '（' + e.id + '）' : e.id, e.id === current); }).join('');
+      if(current && ids.indexOf(current) < 0) html += option(current, current + '（这个模型不支持）', true);
+      slot.innerHTML = html + '</select>';
+      hint.textContent = current && ids.indexOf(current) < 0
+        ? (current === 'off' ? '这个模型没有“off”，会自动用最轻的一档。' : '这个模型不支持“' + current + '”，请换一档；不换的话会自动用最接近的一档。')
+        : data.efforts.length ? '检查用最低一档就够了；编译可以高一些。' : '这个模型没有思考强度可选。';
+      hint.className = current && ids.indexOf(current) < 0 ? 'note' : 'hint';
+    } else {
+      slot.innerHTML = '<input id="set-' + section + '-reasoningEffort" type="text" value="' + esc(current) + '" placeholder="留空表示模型默认">';
+      hint.textContent = provider && model ? '读不到这个模型的信息，只能手填。' : '';
+      hint.className = 'hint';
+    }
+  }
+  async function renderSettings(){
+    var data = state.settings, e = data.effective, main = data.mainRoute;
+    var mainLabel = '跟主对话用同一个' + (main ? '（' + main.provider + '/' + main.model + '）' : '');
+    var r = e.runtime;
+    $('settings-body').innerHTML = '<div class="card" style="margin-bottom:14px"><div class="card-body" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">'
+      + '<div style="margin-right:auto">现在检查用的是 <b>' + esc(data.route) + '</b><div class="faint" style="font-size:12px">改动保存后立即生效，存放在 ' + esc(data.path) + (data.projectLayer ? '；这个项目还有自己的设置（' + esc(data.projectLayer.path) + '），它只能缩小用哪些 skill' : '') + '</div></div></div>'
+      + (data.errors && data.errors.length ? '<div class="card-body err">设置里有写错的地方，已按默认处理：' + esc(data.errors.join('；')) + '</div>' : '') + '</div>'
+      + '<div class="settings">'
+      + routeCard('decision', '检查用的模型', e.decision, '建议选便宜、反应快的模型')
+      + routeCard('compiler', '编译 skill 用的模型', e.compiler, '留空就和检查用同一个')
+      + '<div class="card"><div class="card-head"><h2>用哪些 skill</h2></div><div class="card-body fields">'
+      + '<div class="field"><label for="set-skills-include">只用这些</label><input id="set-skills-include" type="text" value="' + esc((e.skills.include || []).join(', ')) + '" placeholder="留空表示全部都用"><div class="hint">skill 名称，用逗号分隔</div></div>'
+      + '<div class="field"><label for="set-skills-exclude">不用这些</label><input id="set-skills-exclude" type="text" value="' + esc((e.skills.exclude || []).join(', ')) + '" placeholder="skill-a, skill-b"></div></div></div>'
+      + '<div class="card"><div class="card-head"><h2>提醒的方式</h2></div><div class="card-body fields">'
+      + '<div class="field"><label for="set-runtime-minConfidence">多有把握才提醒</label><div class="unit"><input id="set-runtime-minConfidence" type="number" min="0" max="100" step="5" value="' + esc(Math.round(r.minConfidence * 100)) + '"><i>%</i></div><div class="hint">越高提醒越少</div></div>'
+      + '<div class="field"><label for="set-runtime-cooldownSteps">同一条提醒至少隔几次检查</label><input id="set-runtime-cooldownSteps" type="number" min="0" max="100" step="1" value="' + esc(r.cooldownSteps) + '"><div class="hint">0 表示不限制</div></div>'
+      + '<div class="field"><label for="set-runtime-heartbeatSteps">每隔几步复查一次</label><input id="set-runtime-heartbeatSteps" type="number" min="0" max="100" step="1" value="' + esc(r.heartbeatSteps) + '"><div class="hint">0 表示不复查</div></div>'
+      + '<label class="switch"><input type="checkbox" id="set-runtime-builtinCards"' + (r.builtinCards ? ' checked' : '') + '>使用通用规则（关掉后只用 skill 里的规则）</label></div></div>'
+      + '</div>';
+    await Promise.all([fillRoute('decision', e.decision, mainLabel), fillRoute('compiler', e.compiler, '和检查用同一个')]);
+    // Offer saving only once every picker is filled from the catalog.
+    var bar = node('div', 'savebar');
+    bar.innerHTML = '<span class="muted">是否拦下操作只能在配置文件里改，避免被网页误关。</span><button class="btn" id="settings-reset">撤销修改</button><button class="btn primary" id="settings-save">保存</button>';
+    $('settings-body').appendChild(bar);
+    $('settings-save').addEventListener('click', saveSettings);
+    $('settings-reset').addEventListener('click', function(){ loadSettings(); });
+  }
+  function collectSettings(){
+    var val = function(id){ var el = $(id); return el ? el.value.trim() : ''; };
+    var number = function(id, scale){ var v = val(id); return v === '' ? null : Number(v) * (scale || 1); };
+    var list = function(id){ return val(id).split(',').map(function(x){ return x.trim(); }).filter(Boolean); };
+    var route = function(s){
+      var out = { provider: val('set-' + s + '-provider'), model: val('set-' + s + '-model'), reasoningEffort: val('set-' + s + '-reasoningEffort') || null, timeoutMs: number('set-' + s + '-timeoutMs', 1000), temperature: number('set-' + s + '-temperature') };
+      // An empty provider means "follow"; its model follows too.
+      if(!out.provider) out.model = '';
+      if(out.timeoutMs != null) out.timeoutMs = Math.round(out.timeoutMs);
+      return out;
+    };
+    var decision = route('decision'), compiler = route('compiler');
+    decision.cacheTtlMs = number('set-decision-cacheTtlMs', 1000); if(decision.cacheTtlMs != null) decision.cacheTtlMs = Math.round(decision.cacheTtlMs);
+    var sys = $('set-compiler-systemAsUser'); if(sys) compiler.systemAsUser = sys.checked;
+    var minc = number('set-runtime-minConfidence');
+    return {
+      decision: decision, compiler: compiler,
+      skills: { include: list('set-skills-include'), exclude: list('set-skills-exclude') },
+      runtime: { minConfidence: minc == null ? null : minc / 100, cooldownSteps: number('set-runtime-cooldownSteps'), heartbeatSteps: number('set-runtime-heartbeatSteps'), builtinCards: $('set-runtime-builtinCards').checked },
+    };
+  }
+  async function saveSettings(){
+    var button = $('settings-save'); button.disabled = true;
+    try{
+      await postJson('/api/settings?' + identityQuery(), { settings: collectSettings() });
+      toast('已保存，已经生效。');
+      catalog.cache = {};
+      await loadSettings(); loadStats();
+    }catch(error){ toast('没保存成功：' + message(error), 'bad'); }
+    finally{ var b = $('settings-save'); if(b) b.disabled = false; }
+  }
+
+  // ---- wiring -------------------------------------------------------------------------------
+  function switchView(view){
+    state.view = view;
+    document.querySelectorAll('.nav [data-view]').forEach(function(tab){ tab.setAttribute('aria-selected', tab.dataset.view === view ? 'true' : 'false'); });
+    document.querySelectorAll('.view').forEach(function(p){ p.classList.toggle('active', p.id === 'view-' + view); });
+    if(view === 'topology' && state.graphDirty && state.data) renderGraph();
+    if(view === 'trail') loadTrail({ quiet: true });
+    if(view === 'overview') loadRecent();
+    if(view === 'settings') loadSettings();
+    if(view === 'overview' || view === 'skills') { if(state.data) render(); }
+  }
+  document.querySelectorAll('.nav [data-view]').forEach(function(tab){ tab.addEventListener('click', function(){ switchView(tab.dataset.view); }); });
+  ['f-boundary', 'f-outcome', 'f-session'].forEach(function(id){ $(id).addEventListener('change', function(){ loadTrail(); }); });
+  var searchTimer = null;
+  $('f-query').addEventListener('input', function(){ clearTimeout(searchTimer); searchTimer = setTimeout(function(){ loadTrail(); }, 250); });
+  $('trail-more').addEventListener('click', function(){ loadTrail({ append: true }); });
+  $('search').addEventListener('input', function(e){ state.cardQuery = e.target.value; renderCards(); });
+  document.querySelectorAll('#card-chips .chip').forEach(function(chip){ chip.addEventListener('click', function(){ state.cardFilter = chip.dataset.filter; renderCards(); }); });
+  document.querySelectorAll('.cardtable .sort').forEach(function(b){ b.addEventListener('click', function(){ var k = b.dataset.sort; state.sort = state.sort.key === k ? { key: k, dir: -state.sort.dir } : { key: k, dir: k === 'title' ? 1 : -1 }; renderCards(); }); });
+  document.querySelectorAll('[data-table]').forEach(function(b){ b.addEventListener('click', function(){ state.tables[b.dataset.table] = !state.tables[b.dataset.table]; renderActivity(); }); });
+  $('project').addEventListener('change', function(){
+    state.cwd = $('project').value; state.signature = ''; state.trail.expanded.clear();
+    var url = new URL(location.href); url.searchParams.set('cwd', state.cwd); history.replaceState(null, '', url);
+    loadStats().then(function(){ loadTrail(); loadRecent(); });
+  });
+  $('auto').addEventListener('click', function(){ state.auto = !state.auto; this.setAttribute('aria-pressed', state.auto ? 'true' : 'false'); this.title = '自动刷新：' + (state.auto ? '开' : '关'); renderNote(); if(state.auto) tick(); });
+  $('theme').addEventListener('click', function(){
+    var dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+    document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+    var url = new URL(location.href); url.searchParams.set('theme', document.documentElement.dataset.theme); history.replaceState(null, '', url);
+  });
+  $('close').addEventListener('click', function(){ window.close(); });
+  $('detail-close').addEventListener('click', function(){ $('detail').close(); });
+  $('compile-retry').addEventListener('click', function(){ compileAction('retry', undefined, this); });
+  $('compile-cancel').addEventListener('click', function(){ compileAction('cancel', undefined, this); });
+  // Rebuilding everything is expensive: the first click asks, the second confirms.
+  var rebuildArmed = null;
+  $('rebuild').addEventListener('click', function(){
+    var b = this;
+    if(!rebuildArmed){ b.textContent = '确定？再点一次'; b.classList.add('danger'); rebuildArmed = setTimeout(function(){ rebuildArmed = null; b.textContent = '全部重新编译'; b.classList.remove('danger'); }, 4000); return; }
+    clearTimeout(rebuildArmed); rebuildArmed = null; b.textContent = '全部重新编译'; b.classList.remove('danger');
+    compileAction('rebuild', undefined, b);
+  });
+  var resizeTimer = null, lastWidth = 0;
+  new ResizeObserver(function(entries){
+    var w = Math.round(entries[0].contentRect.width);
+    if(w === lastWidth || !state.data) return; lastWidth = w;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(function(){ renderActivity(); state.graphDirty = true; if(state.view === 'topology') renderGraph(); }, 120);
+  }).observe(document.querySelector('.app'));
+
+  loadStats().then(function(){
+    loadRecent(); loadTrail();
+    // `?view=skills` opens a tab directly, e.g. from a link in a message.
+    var initial = params.get('view');
+    if(initial && $('view-' + initial)) switchView(initial);
+  });
+  setInterval(tick, 5000);
+})();
+</script>
+</body>
+</html>

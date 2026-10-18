@@ -1,0 +1,43 @@
+{
+  "enabled": true,
+  "shadow": false,
+  "minConfidence": 0.6,
+  "cooldownSteps": 3,
+  "heartbeatSteps": 8,
+  "builtinCards": true,
+  "skills": {
+    "enabled": true,
+    "include": [],
+    "exclude": []
+  },
+  "decision": {
+    "provider": "deepseek-account",
+    "model": "deepseek-flash",
+    "temperature": 0.1,
+    "reasoningEffort": "off",
+    "timeoutMs": 15000,
+    "cacheTtlMs": 15000
+  },
+  "compiler": {
+    "provider": "deepseek-account",
+    "model": "deepseek-flash",
+    "temperature": 0.1,
+    "systemAsUser": true,
+    "timeoutMs": 180000
+  },
+  "enforcement": {
+    "enabled": true,
+    "cards": [
+      "halt",
+      "scope",
+      "anti_reward_hacking",
+      "no_cheat",
+      "trust_boundary",
+      "refuted_premise"
+    ]
+  },
+  "dashboard": {
+    "enabled": true,
+    "path": "/eng-protocol"
+  }
+}

@@ -1,0 +1,13 @@
+# One-shot overlay for a DSH source launch:
+#   dsh web --patch D:/Myproject/dp-dp/dsh-eng-protocol/cordis.patch.yml
+# A relative `name` resolves beside this file.
+- insert:
+    - id: eng-protocol
+      name: ./index.js
+      config:
+        dashboard:
+          path: /eng-protocol
+        skills:
+          enabled: true
+        enforcement:
+          enabled: true

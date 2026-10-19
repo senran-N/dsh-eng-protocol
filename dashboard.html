@@ -943,7 +943,7 @@
       if(state.historyFor !== id) return;
       if(!data.items.length){ box.innerHTML = '<div class="muted">最近还没有检查过这条规则。</div>'; return; }
       box.innerHTML = '<div class="scroll"><table class="assess"><thead><tr><th>时间</th><th>时机</th><th>判断</th><th class="num">把握</th><th>原因</th></tr></thead><tbody>'
-        + data.items.map(function(r){ var a = (r.assessments || {})[id] || {}, l = STATE[a.state] || [a.state || '—', 'plain']; return '<tr' + ((r.selected || []).indexOf(id) >= 0 ? ' class="picked"' : '') + '><td class="muted">' + esc(ago(r.ts)) + '</td><td>' + esc(BOUNDARY[r.boundary] || '—') + '</td><td>' + pill(l[0], l[1]) + '</td><td class="num">' + esc(percent(a.confidence)) + '</td><td class="reason">' + esc(a.reason || '—') + '</td></tr>'; }).join('') + '</tbody></table></div>';
+        + data.items.map(function(r){ var a = (r.assessments || {})[id] || {}, l = STATE[a.state] || [a.state || '—', 'plain'], why = a.state ? a.reason : RESULT[((r.reasons || {})[id] || {}).kind]; return '<tr' + ((r.selected || []).indexOf(id) >= 0 ? ' class="picked"' : '') + '><td class="muted">' + esc(ago(r.ts)) + '</td><td>' + esc(BOUNDARY[r.boundary] || '—') + '</td><td>' + pill(l[0], l[1]) + '</td><td class="num">' + esc(percent(a.confidence)) + '</td><td class="reason">' + esc(why || '—') + '</td></tr>'; }).join('') + '</tbody></table></div>';
     }catch(error){ if(state.historyFor === id) box.innerHTML = '<div class="err">' + esc(message(error)) + '</div>'; }
   }
 

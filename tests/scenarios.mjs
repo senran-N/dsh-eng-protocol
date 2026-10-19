@@ -570,6 +570,37 @@ test('deferred and fresh notices deliver every needed card exactly once, with no
   assert.deepEqual(delivered.sort(), ['thrashing', 'verify'], 'both needed cards arrive, the shared one only once')
 })
 
+test('a new turn with more rules than one wave holds judges entry cards first and never sends the rules of skills out of scope', async () => {
+  // 400 rules each in two skills: more than any wave can hold (64 cards × 12 calls).
+  const big = 400
+  const onTurn = (count) => Object.fromEntries(Array.from({ length: count }, (_, index) => [`s${index + 1}`, { triggers: ['turn'] }]))
+  const host = createHost({
+    skills: ['android', 'postgres', 'docx'],
+    cardOverrides: { android: onTurn(SECTION_TRIGGERS.length), postgres: onTurn(big), docx: onTurn(big) },
+  })
+  host.skillOverrides = { postgres: { content: bodyOf('postgres', big) }, docx: { content: bodyOf('docx', big) } }
+  const agent = host.agent('layers')
+  await host.ready(agent)
+  for (const name of ['android', 'postgres', 'docx']) await host.load(agent, name)
+  await host.compiled(agent, 'android')
+  await host.compiled(agent, 'postgres', big)
+  await host.compiled(agent, 'docx', big)
+  host.verdict = (id) => ({ state: id === entryOf('android') ? 'addressing' : isEntry(id) ? 'inapplicable' : 'satisfied' })
+  const before = host.calls.length
+  await host.preStep(agent, [user('the android build fails on CI')])
+  const asked = host.calls.slice(before).map((call) => call.ids)
+  assert.ok(asked[0].includes(entryOf('android')) && asked[0].includes(entryOf('postgres')), 'the entry cards go first')
+  assert.ok(asked[0].every((id) => BUILTIN.has(id) || isEntry(id)), 'with no skill rule beside them')
+  assert.deepEqual(asked.slice(1).flatMap((ids) => sectionsOf('android', ids)).length, SECTION_TRIGGERS.length, 'the skill still in scope is expanded')
+  assert.ok(asked.every((ids) => sectionsOf('postgres', ids).length === 0 && sectionsOf('docx', ids).length === 0), 'skills out of scope are never expanded')
+  const record = (await host.decisions()).filter((item) => item.kind === 'decision' && item.boundary === 'request').at(-1)
+  assert.equal(record.rounds, 2)
+  const unexpanded = sectionsOf('postgres', record.candidates)
+  assert.equal(unexpanded.length, big, 'the rules left unexpanded are still listed')
+  assert.deepEqual(record.reasons[unexpanded[0]], { kind: 'scope', by: entryOf('postgres') })
+  assert.match((await host.command(agent, 'status')).text, /正在用的 skill：android$/m, 'skills out of scope leave the session')
+})
+
 let failed = 0
 for (const { name, fn } of checks) {
   try {

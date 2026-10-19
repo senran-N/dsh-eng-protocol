@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.ENG_PROTOCOL_RETRY_BASE_MS = '1'
-const { AdaptiveLimiter, AdaptiveRegistry, LatencyTracker, classifyError, withRetry } = await import('../lib/adaptive.js')
+const { AdaptiveLimiter, AdaptiveRegistry, AdaptiveSize, LatencyTracker, classifyError, sleep: waitFor, withRetry } = await import('../lib/adaptive.js')
 const { cancelCompile, compileSkill, compileStatusFor, graphFor, memoryParts, refreshSkills, settleCompiles, stopCompiles, wantSkill } = await import('../lib/compiler.js')
-const { normalizeConfig, saveUserSettings } = await import('../lib/config.js')
-const { evaluateDecision } = await import('../lib/decide.js')
+const { decisionRoute, normalizeConfig, saveUserSettings } = await import('../lib/config.js')
+const { evaluateDecision, packBatches, planRounds } = await import('../lib/decide.js')
 const { BUILTIN_CARDS } = await import('../lib/cards.js')
 const { compileSummary } = await import('../lib/dashboard.js')
 
@@ -17,7 +17,7 @@ const route = { provider: 'mock', model: 'mock' }
 const config = normalizeConfig({}, process.cwd())
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
-/** A fake host LLM: `reply(prompt, index)` returns text, `{ text, finish }`, or throws. */
+/** A fake host LLM: `reply(prompt, index, callConfig, signal)` returns text, `{ text, finish }`, or throws. */
 function fakeLlm(reply) {
   const prompts = []
   return {
@@ -25,10 +25,10 @@ function fakeLlm(reply) {
     async prepareCall(callConfig) {
       return {
         config: callConfig,
-        async *stream({ messages }) {
+        async *stream({ messages, signal }) {
           const prompt = messages[0].content[0].text
           prompts.push({ prompt, maxTokens: callConfig.maxTokens })
-          const out = await reply(prompt, prompts.length - 1, callConfig)
+          const out = await reply(prompt, prompts.length - 1, callConfig, signal)
           const { text, finish = 'stop' } = typeof out === 'string' ? { text: out } : out
           yield { type: 'text-delta', text }
           yield { type: 'finish', reason: { kind: finish } }
@@ -342,6 +342,129 @@ test('the judge splits a candidate set whose answer would not fit, and judges ev
   assert.ok(result.record.splits >= 1)
   const judge = state.adaptive.snapshot().find((entry) => entry.purpose === 'judge')
   assert.ok(judge.size.current <= 12, 'the batch size shrinks for the next judgment')
+})
+
+const ruleCard = (id, extra = {}) => ({ id, title: id, when: 'w', rules: ['r'], triggers: ['edit'], skill: 'x', ...extra })
+const idsOf = (prompt) => JSON.parse(prompt.split('CANDIDATE CARDS:\n')[1].split('\n\nCritical cards')[0]).map((card) => card.id)
+/** A judge answer for `ids`: satisfied unless `pick(id)` says otherwise. */
+const answer = (ids, pick = () => ({})) => JSON.stringify({ cards: ids.map((id) => ({ id, state: 'satisfied', confidence: 0.9, ...pick(id) })) })
+const judgeAgent = { options: route }
+const judgeState = (raw = {}) => ({ config: normalizeConfig(raw, process.cwd()), adaptive: new AdaptiveRegistry() })
+const judgeControl = (state) => state.adaptive.for('judge', decisionRoute(judgeAgent, state.config))
+const decide = (llm, state, cards, snapshot = {}) => evaluateDecision({ get: () => llm }, state, { agent: judgeAgent, cooldowns: new Map() }, {
+  boundary: 'tool', triggers: ['edit'], candidates: cards, graph: { cards, relations: [], revision: 'r' }, ledger: {}, ...snapshot,
+})
+
+test('the batch size grows only after full batches answered whole', async () => {
+  const llm = fakeLlm((prompt) => answer(idsOf(prompt)))
+  const state = judgeState()
+  const small = Array.from({ length: 3 }, (_, index) => ruleCard(`small_${index}`))
+  for (let run = 0; run < 12; run += 1) await decide(llm, state, small)
+  assert.equal(judgeControl(state).size.current, 24, 'a 3-card judgment says nothing about a 24-card batch')
+  const full = Array.from({ length: 24 }, (_, index) => ruleCard(`full_${index}`))
+  for (let run = 0; run < 8; run += 1) await decide(llm, state, full)
+  assert.equal(judgeControl(state).size.current, 30, 'eight full batches answered whole let it grow')
+})
+
+test('batches failing at the same size shrink it once; a smaller size failing halves it again', () => {
+  const size = new AdaptiveSize({ initial: 24, min: 1, max: 64 })
+  for (let batch = 0; batch < 4; batch += 1) size.shrink(24)
+  assert.equal(size.current, 12)
+  size.shrink(12)
+  assert.equal(size.current, 6)
+})
+
+test('a time limit keeps the batches that answered, and a batch too slow for it shrinks the next ones', async () => {
+  const llm = fakeLlm(async (prompt, index, callConfig, signal) => {
+    const ids = idsOf(prompt)
+    // The full batch never answers in time; the small one answers at once.
+    if (ids.length > 6) await waitFor(5000, signal).catch(() => {})
+    return answer(ids, (id) => (id === 'card_29' ? { state: 'needed' } : {}))
+  })
+  const state = judgeState({ decision: { timeoutMs: 800 } })
+  const cards = Array.from({ length: 30 }, (_, index) => ruleCard(`card_${index}`))
+  const result = await decide(llm, state, cards)
+  assert.equal(result.record.deadlineExpired, true)
+  assert.match(result.record.error, /一部分规则没在时限内检查完/)
+  assert.deepEqual(result.cards.map((card) => card.id), ['card_29'], 'the batch that answered in time still delivers')
+  assert.deepEqual(result.assessments.card_0, { state: 'unknown', confidence: 0, reason: '这条没在时限内检查完' })
+  assert.equal(judgeControl(state).size.current, 12, 'the next judgment sends smaller batches')
+})
+
+test('a batch cut off while it waited for a slot does not shrink the size', async () => {
+  const llm = fakeLlm(async (prompt, index, callConfig, signal) => {
+    const ids = idsOf(prompt)
+    // The first batch holds the only slot for two thirds of the limit; the
+    // second starts late and is cut off soon after through no fault of its size.
+    if (ids.length > 6) await sleep(1000)
+    else await waitFor(5000, signal).catch(() => {})
+    return answer(ids)
+  })
+  const state = judgeState({ decision: { timeoutMs: 1500 } })
+  judgeControl(state).limiter.limit = 1
+  const cards = Array.from({ length: 30 }, (_, index) => ruleCard(`card_${index}`))
+  const result = await decide(llm, state, cards)
+  assert.equal(result.record.deadlineExpired, true)
+  assert.equal(result.assessments.card_0.state, 'satisfied')
+  assert.equal(result.assessments.card_29.state, 'unknown')
+  assert.equal(judgeControl(state).size.current, 24)
+})
+
+test('batches keep related rules together; skill membership joins nothing', () => {
+  const cards = ['a', 'b', 'c', 'd'].map((id) => ruleCard(id))
+  const ids = (batches) => batches.map((batch) => batch.map((card) => card.id))
+  assert.deepEqual(ids(packBatches(cards, 2)), [['a', 'b'], ['c', 'd']])
+  assert.deepEqual(ids(packBatches(cards, 2, [{ type: 'requires', source: 'b', target: 'd' }])), [['a'], ['b', 'd'], ['c']])
+  assert.deepEqual(ids(packBatches(cards, 2, [{ type: 'contains', source: 'b', target: 'd' }])), [['a', 'b'], ['c', 'd']])
+  // A group bigger than a batch is cut in order and its tail shares the next batch.
+  const chain = [{ type: 'requires', source: 'a', target: 'b' }, { type: 'blocks', source: 'b', target: 'c' }]
+  assert.deepEqual(ids(packBatches(cards, 2, chain)), [['a', 'b'], ['c', 'd']])
+})
+
+/** Two loaded skills: `keep` stays in scope, `drop` does not; each has three rules under its entry card. */
+function layered() {
+  const entry = (skill) => ruleCard(`skill_${skill}_entry`, { skill, entry: true, triggers: ['turn'] })
+  const rules = (skill) => Array.from({ length: 3 }, (_, index) => ruleCard(`skill_${skill}_r${index}`, { skill, triggers: ['turn'] }))
+  const cards = [entry('keep'), entry('drop'), ...rules('keep'), ...rules('drop')]
+  const relations = cards.filter((card) => !card.entry).map((card) => ({ type: 'contains', source: `skill_${card.skill}_entry`, target: card.id }))
+  const llm = fakeLlm((prompt) => answer(idsOf(prompt), (id) => (
+    id === 'skill_drop_entry' ? { state: 'inapplicable' }
+      : id === 'skill_keep_entry' ? { state: 'addressing' }
+        : id === 'skill_keep_r0' ? { state: 'needed' } : {})))
+  const snapshot = { boundary: 'request', triggers: ['turn'], graph: { cards, relations, revision: 'r' }, activeSkills: new Set(['keep', 'drop']) }
+  return { cards, relations, llm, snapshot, asked: () => llm.prompts.map(({ prompt }) => idsOf(prompt)) }
+}
+
+test('a new turn too big for one wave judges entry cards first and expands only the skills still in scope', async () => {
+  const { cards, llm, snapshot, asked } = layered()
+  const state = judgeState()
+  // Two cards a batch and two batches at a time: one wave holds four of the eight cards.
+  judgeControl(state).size.value = 2
+  judgeControl(state).limiter.limit = 2
+  const result = await decide(llm, state, cards, snapshot)
+  assert.deepEqual(asked()[0], ['skill_keep_entry', 'skill_drop_entry'], 'the entry cards go first, alone')
+  assert.deepEqual(asked().slice(1).flat(), ['skill_keep_r0', 'skill_keep_r1', 'skill_keep_r2'], 'only the skill still in scope is expanded')
+  assert.match(llm.prompts[1].prompt, /ASSESSMENTS ALREADY MADE AT THIS SAME BOUNDARY:\n\{"skill_keep_entry":\{"state":"addressing"/)
+  assert.equal(result.record.rounds, 2)
+  assert.deepEqual(result.cards.map((card) => card.id), ['skill_keep_r0'])
+  assert.ok(result.record.candidates.includes('skill_drop_r0'), 'the rules left unexpanded are still listed')
+  assert.equal(result.record.assessments.skill_drop_r0, undefined, 'and carry no made-up verdict')
+  assert.deepEqual(result.record.reasons.skill_drop_r0, { kind: 'scope', by: 'skill_drop_entry' })
+})
+
+test('a new turn that fits in one wave is judged in one round', async () => {
+  const { cards, llm, snapshot, asked } = layered()
+  const result = await decide(llm, judgeState(), cards, snapshot)
+  assert.equal(asked().length, 1)
+  assert.equal(result.record.rounds, undefined)
+  assert.deepEqual(result.cards.map((card) => card.id), ['skill_keep_r0'], 'a skill out of scope still delivers nothing')
+})
+
+test('the rules of a skill invoked this very step are never held back', () => {
+  const { cards, relations } = layered()
+  const plan = planRounds(cards, relations, { invoked: 'drop', wave: 0 })
+  assert.deepEqual(plan.held.map((card) => card.id), ['skill_keep_r0', 'skill_keep_r1', 'skill_keep_r2'])
+  assert.ok(plan.first.some((card) => card.id === 'skill_drop_r0'))
 })
 
 test('retired fields from older versions are ignored and silently removed on save', async () => {

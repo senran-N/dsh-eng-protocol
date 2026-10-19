@@ -284,6 +284,8 @@ export function apply(ctx, rawConfig = {}) {
       graph: graphFor(state, item.cwd, item.agent),
       ledger: item.ledger.summary(),
       activeSkills: new Set(item.activeSkills),
+      // Invoked this very step: in scope by definition, so its rules are judged at once.
+      invoked: triggers.includes('skill') ? item.ledger.lastSkill : '',
       signal,
     }
   }

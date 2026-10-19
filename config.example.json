@@ -8,7 +8,8 @@
   "skills": {
     "enabled": true,
     "include": [],
-    "exclude": []
+    "exclude": [],
+    "standing": true
   },
   "decision": {
     "provider": "deepseek-account",
@@ -34,7 +35,8 @@
       "no_cheat",
       "trust_boundary",
       "refuted_premise"
-    ]
+    ],
+    "skillCheckpoints": true
   },
   "dashboard": {
     "enabled": true,

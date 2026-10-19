@@ -1,19 +1,30 @@
 /**
  * dsh-eng-protocol — event-driven engineering protocol guidance for DeepSeek Harness.
  *
- * The plugin compiles the host's loaded skills into decision cards, detects
- * evidence locally, asks a small decision model only about the cards that the
- * evidence can trigger, and injects a short reminder at the request, tool, or
- * delivery boundary. Every decision is logged; the dashboard renders the card
- * topology and the trigger trail.
+ * Skills an agent uses are compiled into grounded decision cards: every
+ * obligation is backed by a quote verified against the skill's own text.
+ * Evidence is detected locally, a small decision model is asked only about the
+ * cards that evidence can trigger, and reminders travel on the host's own
+ * channels, each at the moment it can still change something:
+ * - standing context (`ctx.systemPrompt.context`): the loaded skills' hard
+ *   requirements, re-materialized by the host only when they change or after
+ *   compaction removed them;
+ * - request (`agent/pre-step`): turn-level checks, skill routing, and verdicts
+ *   on tool results;
+ * - before an action (`tools/pre-execute`): an enforceable card blocks once;
+ * - after an action (`tools/post-execute`): advisory verdicts ride that tool's
+ *   own result;
+ * - delivery (`agent/turn-stopping`): a final review may continue the turn once.
+ * Every decision is logged; the dashboard renders the cards and the trail.
  */
-import { AdaptiveRegistry, sleep } from './lib/adaptive.js'
+import { sleep } from './lib/adaptive.js'
 import { agentCwd, resolveConfig } from './lib/config.js'
-import { candidateCards, isEntryCard, renderGuidance } from './lib/cards.js'
-import { cancelCompile, forgetAgent, graphFor, graphReady, refreshSkills } from './lib/compiler.js'
+import { candidateCards, enforceable, isEntryCard, renderGuidance, renderStanding } from './lib/cards.js'
+import { cancelCompile, compileStatusFor, forgetAgent, graphFor, graphReady, refreshSkills, stopCompiles, wantSkill } from './lib/compiler.js'
 import { evaluateDecision, sourceSummary } from './lib/decide.js'
 import { SessionLedger, actionExcerpt, actionTriggers, classifyTool } from './lib/events.js'
 import { Aftermath } from './lib/aftermath.js'
+import { AdaptiveRegistry } from './lib/adaptive.js'
 import { appendDecision } from './lib/store.js'
 import { errorMessage, hash, messageId, oneLine } from './lib/text.js'
 import { compileSummary, registerDashboard } from './lib/dashboard.js'
@@ -21,6 +32,8 @@ import { compileSummary, registerDashboard } from './lib/dashboard.js'
 export const name = 'eng-protocol'
 
 const SOURCE = 'eng-protocol'
+// Runtime-context placement: after the harness's own contexts (100–210).
+const STANDING_ORDER = 400
 const HELP_TEXT = [
   '/protocol                 现在的状态',
   '/protocol cards           当前生效的规则',
@@ -32,11 +45,25 @@ const HELP_TEXT = [
   '/protocol shadow          在这个会话里只观察：照常检查和记录，但不提醒、不拦下',
   '/protocol help            显示这份说明',
 ].join('\n')
-const SKILL_STATE = { cached: '已就绪', done: '已就绪', queued: '等待中', compiling: '准备中', retrying: '稍后再试', failed: '没准备好', cancelled: '已暂停' }
+const SKILL_STATE = { cached: '已就绪', done: '已就绪', standby: '用到时再准备', queued: '等待中', compiling: '准备中', retrying: '稍后再试', failed: '没准备好', cancelled: '已暂停' }
 
 /** Wait for `promise`, giving up quietly after `ms` or when `signal` aborts. */
 function waitAtMost(promise, ms, signal) {
   return Promise.race([Promise.resolve(promise).catch(() => undefined), sleep(ms, signal).catch(() => undefined)])
+}
+
+/** Wait for `promise`, rejecting as soon as `signal` aborts. */
+function unlessAborted(promise, signal) {
+  if (!signal) return promise
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason ?? new Error('aborted')); return }
+    const stop = () => reject(signal.reason ?? new Error('aborted'))
+    signal.addEventListener('abort', stop, { once: true })
+    Promise.resolve(promise).then(
+      (value) => { signal.removeEventListener('abort', stop); resolve(value) },
+      (error) => { signal.removeEventListener('abort', stop); reject(error) },
+    )
+  })
 }
 
 /** Wait until a set of in-flight judgments settles; each one carries its own adaptive deadline. */
@@ -72,9 +99,8 @@ export function apply(ctx, rawConfig = {}) {
   const state = {
     ctx,
     config,
+    // The most recently published graph per project, for the project summary view.
     graphs: new Map(),
-    compileRuns: new Map(),
-    compileStatus: new Map(),
     projectConfigs: new Map(),
     compileAbort: new AbortController(),
     agents: new WeakMap(),
@@ -126,21 +152,19 @@ export function apply(ctx, rawConfig = {}) {
       agent,
       cwd,
       ledger: new SessionLedger(agent, { heartbeatSteps: state.config.heartbeatSteps }),
-      chain: Promise.resolve(),
       // Aborts tool-boundary judgments still running when their turn ends.
       deferred: new AbortController(),
-      // Reminders judged at the tool boundary, delivered at the next step.
+      // Reminders that could not ride a tool result, delivered at the next step.
       pending: [],
+      // Tool-boundary verdicts waiting for their tool's result (`tools/post-execute`), by call id.
+      claims: new Map(),
       // Calls soft-blocked this turn; the same call goes through on retry.
       retryKeys: new Set(),
       settledTurn: undefined,
-      // Skills in scope for this agent, until an entry card is judged inapplicable.
+      // Skills this agent has loaded (or the user invoked), until judged out of scope.
       activeSkills: new Set(),
-      // This agent's decision clock and card cooldowns.
-      decisionTick: 0,
+      // Card id → step of its last delivery; cleared at a new turn.
       cooldowns: new Map(),
-      scopeVersions: new Map(),
-      pendingEntries: new Set(),
       disposed: false,
       // What the agent did after each reminder, read from the session events.
       aftermath: new Aftermath(),
@@ -166,19 +190,35 @@ export function apply(ctx, rawConfig = {}) {
 
   function discardPending(item, reason) {
     for (const entry of item.pending.splice(0)) finish(item, entry.result, 'live', [], reason)
+    for (const [callId, claim] of item.claims) {
+      item.claims.delete(callId)
+      if (claim.result) finish(item, claim.result, 'live', [], reason)
+    }
   }
 
-  function ensureCompile(agent) {
+  /** Settled tool-boundary verdicts that no tool result carried; they ride the next model-visible boundary instead. */
+  function drainClaims(item) {
+    const out = []
+    for (const [callId, claim] of item.claims) {
+      if (!claim.settled) continue
+      item.claims.delete(callId)
+      if (claim.result) out.push(delivery('tool', claim.triggers, claim.result))
+    }
+    return out
+  }
+
+  /** Read the agent's skill catalog once (no model call); skills it already uses start compiling. */
+  function ensureCatalog(agent) {
     if (state.started.has(agent)) return
     state.started.add(agent)
-    void refreshSkills(ctx, state, agent).catch((error) => warn('skill 图编译失败', error))
-    // The first step waits for the cached graph (no model call) so it already
-    // sees real skill cards instead of a built-ins-only graph.
-    const item = state.agents.get(agent)
-    if (item) item.firstCompile = graphReady(state, agent)
+    const item = agentState(agent)
+    // Skills a resumed session had already loaded are in use.
+    for (const skill of item.activeSkills) void wantSkill(ctx, state, agent, skill)
+    void refreshSkills(ctx, state, agent).catch((error) => warn('skill 目录读取失败', error))
+    item.firstCatalog = graphReady(state, agent)
   }
 
-  /** Drain evidence. A new human turn resets the per-turn soft-block memory and stale deferred reminders. */
+  /** Drain evidence. A new human turn resets the per-turn soft-block memory, cooldowns and stale deferred reminders. */
   function observe(item, messages) {
     const triggers = new Set(item.ledger.observe(messages).triggers)
     if (triggers.has('turn')) {
@@ -186,54 +226,51 @@ export function apply(ctx, rawConfig = {}) {
       item.retryKeys.clear()
       discardPending(item, 'new-turn')
       item.cooldowns.clear()
-      item.scopeVersions.clear()
-      item.pendingEntries.clear()
     }
     return triggers
   }
 
-  /** A skill the agent loads is in scope until its entry card is judged inapplicable. */
+  /**
+   * A skill enters scope when the agent actually has its text: the model
+   * loaded it, or the user invoked it. That is also when it is compiled, once,
+   * for every agent and project that uses the same text.
+   */
   function noteSkillLoad(item, triggers) {
-    if (triggers.has('skill')) {
-      for (const name of item.ledger.observedSkills) item.activeSkills.add(name)
+    if (!triggers.has('skill')) return
+    for (const skill of item.ledger.observedSkills) {
+      item.activeSkills.add(skill)
+      void Promise.resolve().then(() => wantSkill(ctx, state, item.agent, skill)).catch((error) => warn('skill 编译失败', error))
     }
   }
 
-  function candidatesFor(item, triggers) {
+  function candidatesFor(item, triggers, action) {
     const ledger = item.ledger
     const graph = graphFor(state, item.cwd, item.agent)
     const names = new Set(graph.graphs.map((skill) => skill.name))
-    const view = state.skillViews?.get(item.agent)
-    const ready = view?.compileStatus.has(item.cwd) && !view.compileRuns.has(item.cwd)
-    for (const name of item.activeSkills) if (!names.has(name) && ready) item.activeSkills.delete(name)
-    for (const skill of graph.graphs) {
-      const version = hash([skill.sourceHash, skill.entry])
-      if (item.scopeVersions.get(skill.name) !== version && (ledger.lastUser || item.activeSkills.has(skill.name))) {
-        item.scopeVersions.set(skill.name, version)
-        item.pendingEntries.add(skill.entry.id)
-      }
+    // A skill that left the catalog leaves scope, once the catalog has really been read.
+    if (state.skillViews?.get(item.agent)?.listed) {
+      for (const skill of item.activeSkills) if (!names.has(skill)) item.activeSkills.delete(skill)
     }
     return candidateCards(graph.cards, {
       triggers: [...triggers],
-      budget: state.config.candidates,
       active: item.activeSkills,
-      pendingEntries: item.pendingEntries,
       relations: graph.relations,
       invoked: triggers.has('skill') ? ledger.lastSkill : '',
       query: [ledger.lastUser, ...[...ledger.filesEdited].slice(-12), ...[...ledger.filesRead].slice(-12)].join('\n'),
+      action,
+      files: [...ledger.filesEdited].slice(-40),
+      commands: ledger.observations.filter((observation) => observation.command).slice(-12).map((observation) => observation.command),
     })
   }
 
+  /** A loaded skill leaves scope when its entry card is confidently judged inapplicable to the task at hand. */
   function updateActiveSkills(item, candidates, assessments = {}) {
     for (const card of candidates) {
-      if (!isEntryCard(card)) continue
+      if (!isEntryCard(card) || !item.activeSkills.has(card.skill)) continue
       const assessment = assessments[card.id]
-      if (!assessment) continue
-      item.pendingEntries.delete(card.id)
-      if (assessment.confidence < state.config.minConfidence) continue
-      const verdict = assessment.state
-      if (verdict === 'inapplicable') item.activeSkills.delete(card.skill)
-      else if (verdict === 'needed' || verdict === 'addressing' || verdict === 'satisfied') item.activeSkills.add(card.skill)
+      if (assessment?.state === 'inapplicable' && assessment.confidence >= state.config.minConfidence) {
+        item.activeSkills.delete(card.skill)
+      }
     }
   }
 
@@ -269,12 +306,11 @@ export function apply(ctx, rawConfig = {}) {
    * of tool-boundary judgments never queues behind one another. Identical
    * recent tool-boundary calls reuse cached verdicts instead of another call.
    */
-  function judge(item, boundary, triggers, action, signal, candidates = candidatesFor(item, triggers), { onSettled } = {}) {
+  function judge(item, boundary, triggers, action, signal, candidates = candidatesFor(item, triggers, action), { onSettled } = {}) {
     if (candidates.length === 0) return Promise.resolve(undefined)
     const list = [...triggers]
-    // Only the tool boundary caches: the production waste was repeated read
-    // triggers for identical actions at one evidence position. Request/settle
-    // judgments drive scope progression and must re-run even on stale evidence.
+    // Only the tool boundary caches: repeated triggers for identical actions at
+    // one evidence position. Request/settle judgments drive scope and re-run.
     const cacheKey = boundary === 'tool' ? judgeCacheKey(item, boundary, triggers, action, candidates) : ''
     const ttl = boundary === 'tool' ? state.config.decision.cacheTtlMs : 0
     if (ttl > 0) {
@@ -291,7 +327,7 @@ export function apply(ctx, rawConfig = {}) {
     const captured = snapshot(item, boundary, list, action, candidates, AbortSignal.any([signal, item.deferred.signal].filter(Boolean)))
     const inflight = (item.inflight ??= new Set())
     // The settle callback runs inside this promise, so a boundary waiting on
-    // in-flight judgments observes the pushed pending reminder in the same step.
+    // in-flight judgments observes their outcome in the same step.
     const promise = (async () => {
       if (item.disposed || captured.signal.aborted) return undefined
       return evaluateDecision(ctx, state, item, captured)
@@ -332,7 +368,8 @@ export function apply(ctx, rawConfig = {}) {
     record.deliveryResponseSeq = watermark.responseSeq
     record.deliveredAt = new Date().toISOString()
     if (['delivered', 'blocked'].includes(disposition) || (mode === 'shadow' && record.wouldInject)) record.deliveryRecorded = true
-    for (const card of mode === 'shadow' ? result.cards : deliveredCards) item.cooldowns.set(card.id, item.decisionTick)
+    // Cooldowns count real steps of the turn, not judge calls.
+    for (const card of mode === 'shadow' ? result.cards : deliveredCards) item.cooldowns.set(card.id, item.ledger.step)
     state.recordDecision(record)
     if (record.deliveryRecorded) item.aftermath.watch(record)
   }
@@ -341,21 +378,25 @@ export function apply(ctx, rawConfig = {}) {
     return { boundary, triggers: [...triggers], cards: result.cards, text: result.guidance, result }
   }
 
-  /** Notices for this step; a card already carried by an earlier one is not repeated. */
+  /**
+   * Notices for this step. A card already carried by an earlier one is not
+   * repeated, nor one another boundary delivered in this same step (delivery
+   * review excepted: it is the last word of the turn). A skill's entry card is
+   * delivered only while that skill is not loaded (a load nudge); its
+   * obligations only while it is.
+   */
   function noticesFor(item, deliveries, assessments = {}, send) {
     const seen = new Set()
     const notices = []
     const current = new Map(graphFor(state, item.cwd, item.agent).cards.map((card) => [card.id, card]))
-    const eligible = (card) => current.has(card.id) && hash(current.get(card.id)) === hash(card)
-      && (!card.skill || card.entry || item.activeSkills.has(card.skill))
+    const step = item.ledger.step
+    const valid = (card) => current.has(card.id) && hash(current.get(card.id)) === hash(card)
+      && (!card.skill || (card.entry ? !item.activeSkills.has(card.skill) : item.activeSkills.has(card.skill)))
       && !(['satisfied', 'addressing', 'inapplicable'].includes(assessments[card.id]?.state)
         && assessments[card.id].confidence >= state.config.minConfidence)
-    const all = [...new Map(deliveries.flatMap((entry) => entry.cards).filter(eligible).map((card) => [card.id, card])).values()]
-      .sort((a, b) => Number(b.critical) - Number(a.critical) || (b.priority ?? 1) - (a.priority ?? 1))
-    // No count cap: every eligible card is delivered once, critical first.
-    const allowed = new Set(all.map((card) => card.id))
     for (const entry of deliveries) {
-      const cards = entry.cards.filter((card) => !seen.has(card.id) && allowed.has(card.id) && eligible(card))
+      const cards = entry.cards.filter((card) => !seen.has(card.id) && valid(card)
+        && (entry.boundary === 'settle' || item.cooldowns.get(card.id) !== step))
       if (cards.length === 0) { finish(item, entry.result, 'live', [], 'superseded'); continue }
       for (const card of cards) seen.add(card.id)
       const text = cards.length === entry.cards.length
@@ -374,9 +415,19 @@ export function apply(ctx, rawConfig = {}) {
     return notices
   }
 
+  /** Standing context for one agent: its loaded skills' grounded requirements, or nothing. */
+  function standingText(agent) {
+    if (!agent || state.config.skills.standing === false || modeFor(agent) !== 'live') return ''
+    const item = state.agents.get(agent)
+    if (!item || item.disposed || item.activeSkills.size === 0) return ''
+    const graph = graphFor(state, item.cwd, agent)
+    const byName = new Map(graph.graphs.map((skill) => [skill.name, skill]))
+    return renderStanding([...item.activeSkills].sort().map((skill) => byName.get(skill)).filter(Boolean))
+  }
+
   ctx.on('agent/created', ({ agent }) => {
     agentState(agent)
-    if (modeFor(agent) !== 'off') ensureCompile(agent)
+    if (modeFor(agent) !== 'off') ensureCatalog(agent)
   })
 
   // ---- request boundary -------------------------------------------------
@@ -388,16 +439,14 @@ export function apply(ctx, rawConfig = {}) {
     const item = agentState(payload.agent)
     item.cwd = agentCwd(payload.agent)
     state.lastCwd = item.cwd
-    ensureCompile(payload.agent)
-    // The first step of a session may arrive before the cached graph is
-    // published. That needs no model call; the hard timeout only guards a host
-    // whose skill catalog never answers.
-    if (item.firstCompile) {
-      await waitAtMost(item.firstCompile, state.config.decision.timeoutMs, payload.signal)
-      item.firstCompile = undefined
+    ensureCatalog(payload.agent)
+    // The first step may arrive before this agent's catalog is read. That needs
+    // no model call; the hard timeout only guards a host whose catalog never answers.
+    if (item.firstCatalog) {
+      await waitAtMost(item.firstCatalog, state.config.decision.timeoutMs, payload.signal)
+      item.firstCatalog = undefined
     }
-    // Deferred tool-boundary judgments land before this step; at a new human
-    // turn the ones still running belong to the previous turn and are cancelled.
+    // At a new human turn, tool-boundary judgments still running belong to the previous turn.
     if (startsTurn(decision.messages)) cancelDeferred(item)
     try {
       // Tool-boundary judgments still running land before this step. They run
@@ -408,12 +457,13 @@ export function apply(ctx, rawConfig = {}) {
       if (Number.isInteger(payload.turn)) item.ledger.turn = payload.turn
       if (Number.isInteger(payload.step)) item.ledger.step = payload.step
       noteSkillLoad(item, triggers)
-      // Deferred reminders never replace this step's own judgment.
       const candidates = candidatesFor(item, triggers)
-      const deliveries = item.pending.splice(0)
+      // Tool-boundary verdicts no tool result could carry ride this step instead;
+      // they never replace this step's own judgment.
+      const deliveries = [...drainClaims(item), ...item.pending.splice(0)]
       let latestAssessments = {}
       const signal = AbortSignal.any([payload.signal, item.deferred.signal])
-      if (triggers.size > 0 || candidates.length > 0) {
+      if (candidates.length > 0) {
         try {
           const result = await judge(item, 'request', triggers, undefined, signal, candidates)
           if (result && !result.cancelled) {
@@ -436,7 +486,7 @@ export function apply(ctx, rawConfig = {}) {
     }
   })
 
-  // ---- tool boundary ----------------------------------------------------
+  // ---- before an action -------------------------------------------------
   ctx.on('tools/pre-execute', async (exec, next) => {
     const mode = modeFor(exec?.agent)
     if (mode === 'off') return next()
@@ -451,20 +501,21 @@ export function apply(ctx, rawConfig = {}) {
     const triggers = observe(item, [])
     for (const trigger of action.kind === 'skill' ? [] : actionTriggers(action, item.ledger.filesEdited.size)) triggers.add(trigger)
     noteSkillLoad(item, triggers)
-    const candidates = candidatesFor(item, triggers)
+    const candidates = candidatesFor(item, triggers, action)
     if (candidates.length === 0) return downstream
     item.ledger.consumeAction(exec.callId)
-    const enforced = new Set(state.config.enforcement.cards)
     const key = hash([exec.name, exec.arguments])
     const canDeny = state.config.enforcement.enabled
       && (action.kind === 'edit' || action.kind === 'command')
       && !item.retryKeys.has(key)
-    const possibleSkills = new Set(candidates.filter(isEntryCard).map((card) => card.skill))
-    const waitForDecision = mode === 'live' && canDeny && (candidates.some((card) => enforced.has(card.id))
-      || graphFor(state, item.cwd, item.agent).cards.some((card) => possibleSkills.has(card.skill) && enforced.has(card.id)))
+    const gate = (card) => enforceable(card, state.config.enforcement)
+    // Only a judgment that can still stop this call is worth waiting for.
+    const waitForDecision = mode === 'live' && canDeny && candidates.some(gate)
+    const claim = { callId: exec.callId, triggers, settled: false, result: undefined, promise: undefined }
     const settle = (result) => {
+      claim.settled = true
       if (!result || result.cancelled || item.disposed || modeFor(exec.agent) !== mode) return undefined
-      const deny = canDeny && (mode !== 'live' || waitForDecision) && result.cards.some((card) => enforced.has(card.id))
+      const deny = canDeny && (mode !== 'live' || waitForDecision) && result.cards.some(gate)
       // One soft block per call and turn; the identical retry goes through.
       if (deny) item.retryKeys.add(key)
       result.record.blocked = mode === 'live' && deny
@@ -474,24 +525,61 @@ export function apply(ctx, rawConfig = {}) {
         finish(item, result, mode, result.cards, 'blocked')
         return { kind: 'deny', reason: result.guidance }
       }
-      if (result.guidance) item.pending.push(delivery('tool', triggers, result))
-      else finish(item, result, mode)
+      if (!result.guidance) { finish(item, result, mode); return undefined }
+      // Advisory verdicts ride this call's own result; without a call id, the next step.
+      if (exec.callId === undefined) item.pending.push(delivery('tool', triggers, result))
+      else claim.result = result
       return undefined
     }
-    // Only a judgment that can still deny this call is worth waiting for. The
-    // rest runs alongside the tool and reaches the model at the next step.
+    const signal = AbortSignal.any([exec.signal, item.deferred.signal].filter(Boolean))
     if (!waitForDecision) {
-      void judge(item, 'tool', triggers, action, AbortSignal.any([exec.signal, item.deferred.signal]), candidates, { onSettled: settle })
-        .catch((error) => warn('执行前判断失败', error))
+      // The rest runs alongside the tool; `tools/post-execute` collects it.
+      claim.promise = judge(item, 'tool', triggers, action, signal, candidates, { onSettled: settle })
+      if (exec.callId !== undefined) item.claims.set(exec.callId, claim)
+      claim.promise.catch((error) => { claim.settled = true; warn('执行前判断失败', error) })
       return downstream
     }
     try {
       // Awaited path: settle decides the deny result, so it must not also run
       // as a deferred callback — pass no onSettled here.
-      return (await judge(item, 'tool', triggers, action, AbortSignal.any([exec.signal, item.deferred.signal]), candidates).then((result) => settle(result) ?? downstream)) ?? downstream
+      const verdict = settle(await judge(item, 'tool', triggers, action, signal, candidates))
+      if (verdict) return verdict
+      if (claim.result && exec.callId !== undefined) {
+        claim.promise = Promise.resolve(claim.result)
+        item.claims.set(exec.callId, claim)
+      }
+      return downstream
     } catch (error) {
       warn('执行前判断失败', error)
       return downstream
+    }
+  })
+
+  // ---- after an action ----------------------------------------------------
+  ctx.on('tools/post-execute', async (exec, result, next) => {
+    const decision = await next()
+    const item = exec?.agent ? state.agents.get(exec.agent) : undefined
+    const claim = item && exec.callId !== undefined ? item.claims.get(exec.callId) : undefined
+    // Only a root call's own result is sure to reach the model; a nested
+    // sub-dispatch leaves its verdict for the next step.
+    if (!claim || exec.parent !== undefined) return decision
+    if (!claim.settled) {
+      try { await unlessAborted(claim.promise, exec.signal) } catch { return decision }
+    }
+    if (item.claims.get(exec.callId) !== claim) return decision
+    item.claims.delete(exec.callId)
+    if (!claim.result) return decision
+    if (modeFor(exec.agent) !== 'live' || item.disposed) {
+      finish(item, claim.result, 'live', [], 'cancelled')
+      return decision
+    }
+    try {
+      const notices = noticesFor(item, [delivery('tool', claim.triggers, claim.result)])
+      if (notices.length === 0) return decision
+      return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), ...notices] }
+    } catch (error) {
+      warn('执行后提醒失败', error)
+      return decision
     }
   })
 
@@ -505,14 +593,15 @@ export function apply(ctx, rawConfig = {}) {
     if (item.settledTurn === turn) return
     item.settledTurn = turn
     try {
-      await settleInflight(item, AbortSignal.any([signal, item.deferred.signal].filter(Boolean)))
+      const bounded = AbortSignal.any([signal, item.deferred.signal].filter(Boolean))
+      await settleInflight(item, bounded)
       const triggers = observe(item, [])
       triggers.add('settle')
       noteSkillLoad(item, triggers)
-      const result = await judge(item, 'settle', triggers, undefined, AbortSignal.any([signal, item.deferred.signal].filter(Boolean)))
+      const result = await judge(item, 'settle', triggers, undefined, bounded)
       if (result?.cancelled) return
       if (mode !== 'live') { if (result) finish(item, result, mode); return }
-      const deliveries = item.pending.splice(0)
+      const deliveries = [...drainClaims(item), ...item.pending.splice(0)]
       if (result?.guidance) deliveries.push(delivery('settle', triggers, result))
       else if (result) finish(item, result, mode)
       if (modeFor(agent) !== 'live' || signal.aborted || item.disposed || typeof agent.inject !== 'function') {
@@ -556,10 +645,27 @@ export function apply(ctx, rawConfig = {}) {
 
   // ---- skill changes ----------------------------------------------------
   ctx.on('skills/change', () => {
-    // Restarting is cheap: unchanged skills are cache hits and finished parts resume.
+    // Re-reading a catalog is cheap: unchanged skills keep their stored compile,
+    // and only changed skills in use compile again (their old compile guards meanwhile).
     for (const agent of state.liveAgents) {
-      void refreshSkills(ctx, state, agent, { restart: true }).catch((error) => warn('skill 变更后重编译失败', error))
+      if (!state.started.has(agent)) continue
+      void refreshSkills(ctx, state, agent).catch((error) => warn('skill 变更后刷新失败', error))
     }
+  })
+
+  // ---- standing context -------------------------------------------------
+  ctx.inject(['systemPrompt'], (promptCtx) => {
+    const prompt = promptCtx.systemPrompt
+    if (!prompt || typeof prompt.context !== 'function') return
+    promptCtx.effect(() => prompt.context({
+      name: 'eng-protocol:skills',
+      order: STANDING_ORDER,
+      // Skill text may contain `{{...}}`; it is quoted, never a prompt variable.
+      interpolate: false,
+      text: (assembly) => {
+        try { return standingText(assembly?.agent) } catch (error) { warn('常驻要求生成失败', error); return '' }
+      },
+    }), 'eng-protocol: standing skill requirements')
   })
 
   // ---- dashboard --------------------------------------------------------
@@ -589,22 +695,22 @@ export function apply(ctx, rawConfig = {}) {
           return { kind: 'success', text: MODE_TEXT[mode] }
         }
         const cwd = agent ? agentCwd(agent) : state.lastCwd
-        const status = () => state.skillViews?.get(agent)?.compileStatus.get(cwd) ?? state.compileStatus.get(cwd)
+        const status = () => (agent ? compileStatusFor(state, agent, cwd) : undefined)
         if (['rebuild', 'retry', 'cancel'].includes(action) && !agent) return { kind: 'error', text: '这个会话还没开始运行，先发一条消息再试。' }
         if (action === 'rebuild') {
           const names = graphFor(state, cwd, agent).graphs.map((graph) => graph.name)
-          if (argument && !names.includes(argument) && !Object.hasOwn(status()?.skills ?? {}, argument)) {
+          if (argument && !names.includes(argument)) {
             return { kind: 'error', text: `没有叫 ${argument} 的 skill。现有的是：${names.join('、') || '（没有）'}` }
           }
           void refreshSkills(ctx, state, agent, { force: true, ...(argument ? { only: [argument] } : {}) }).catch((error) => warn('skill 图重建失败', error))
           return { kind: 'success', text: `${argument ? `正在重新编译 ${argument}` : '正在重新编译全部 skill'}，期间旧规则照常工作。进度可以用 /protocol skills 查看。` }
         }
         if (action === 'retry') {
-          const failed = Object.entries(status()?.skills ?? {}).filter(([, entry]) => entry.state === 'failed').map(([name]) => name)
+          const failed = Object.entries(status()?.skills ?? {}).filter(([, entry]) => ['failed', 'cancelled'].includes(entry.state)).map(([skill]) => skill)
           void refreshSkills(ctx, state, agent, { queue: true }).catch((error) => warn('skill 重试失败', error))
           return { kind: 'success', text: failed.length > 0
             ? `正在重试：${failed.join('、')}。上次做完的部分不会重做。`
-            : '所有 skill 都准备好了；也顺便看了一遍有没有新加或改过的 skill。' }
+            : '没有需要重试的 skill；也顺便看了一遍有没有新加或改过的 skill。' }
         }
         if (action === 'cancel') {
           return cancelCompile(state, agent)
@@ -613,31 +719,33 @@ export function apply(ctx, rawConfig = {}) {
         }
         const graph = graphFor(state, cwd, agent)
         if (action === 'cards') {
-          const lines = graph.cards.map((card) => `${card.skill ? 'skill' : 'builtin'}\t${card.id}\t${card.title}\t${card.triggers.join(',')}`)
+          const kind = (card) => !card.skill ? 'builtin' : card.entry ? 'entry' : card.checkpoint ? 'skill·动手前' : 'skill'
+          const lines = graph.cards.map((card) => `${kind(card)}\t${card.id}\t${card.title}\t${card.triggers.join(',')}`)
           return { kind: 'success', text: [`决策卡 ${graph.cards.length} 张（来自 skill ${graph.cards.filter((card) => card.skill).length} 张，通用 ${graph.cards.filter((card) => !card.skill).length} 张）`, ...lines].join('\n') }
         }
         if (action === 'skills') {
           const current = status()
           const entries = Object.entries(current?.skills ?? {}).sort(([a], [b]) => a.localeCompare(b))
           if (entries.length === 0) return { kind: 'success', text: '这个项目还没有 skill。' }
-          const lines = entries.map(([name, entry]) => {
+          const lines = entries.map(([skill, entry]) => {
             const detail = entry.state === 'failed'
               ? `${entry.hint ?? ''}${entry.stale ? ' 在此之前仍用旧版规则。' : ''}`
               : entry.state === 'retrying' ? entry.hint ?? ''
                 : entry.state === 'compiling' && entry.parts > 1 ? `已完成 ${Math.round((entry.partsDone ?? 0) / entry.parts * 100)}%`
                   : ''
-            return `${SKILL_STATE[entry.state] ?? entry.state}\t${name}${detail ? `\t${detail}` : ''}`
+            return `${SKILL_STATE[entry.state] ?? entry.state}\t${skill}${detail ? `\t${detail}` : ''}`
           })
           return { kind: 'success', text: [compileSummary(current), ...lines].join('\n') }
         }
         if (action !== 'status') return { kind: 'error', text: `没有“${action}”这个命令。\n\n${HELP_TEXT}` }
         const current = status()
         const item = agent ? state.agents.get(agent) : undefined
+        const skillCards = graph.cards.filter((card) => card.skill && !card.entry).length
         return {
           kind: 'success',
           text: [
             `Eng Protocol：${{ live: '守护中', shadow: '影子模式（只观察，不打扰）', off: '已关闭' }[modeFor(agent)]}`,
-            `生效的规则：${graph.cards.length} 条（来自 ${graph.graphs.length} 个 skill，另有 ${graph.cards.filter((card) => !card.skill).length} 条通用规则）`,
+            `生效的规则：通用 ${graph.cards.filter((card) => !card.skill).length} 条；${graph.graphs.length} 个 skill 已整理出 ${skillCards} 条`,
             `skill：${compileSummary(current)}`,
             `这个会话正在用的 skill：${item && item.activeSkills.size > 0 ? [...item.activeSkills].join('、') : '暂时没有'}`,
             `检查用的模型：${state.config.decision.provider && state.config.decision.model ? `${state.config.decision.provider}/${state.config.decision.model}` : '跟主对话用同一个'}`,
@@ -650,18 +758,19 @@ export function apply(ctx, rawConfig = {}) {
 
   ctx.effect(() => () => {
     state.compileAbort.abort()
+    stopCompiles(state)
     for (const agent of state.liveAgents) {
       const item = state.agents.get(agent)
+      if (!item) continue
       item.disposed = true
       item.deferred.abort()
       discardPending(item, 'disposed')
-    state.recordAftermath(item.aftermath.flush('disposed'))
+      state.recordAftermath(item.aftermath.flush('disposed'))
       forgetAgent(state, agent)
     }
     state.liveAgents.clear()
     state.sessions.clear()
     state.graphs.clear()
-    state.compileRuns.clear()
   }, 'eng-protocol: teardown')
 
   ctx.logger?.info?.(`eng-protocol: 已加载；面板 ${state.config.dashboard.path}`)

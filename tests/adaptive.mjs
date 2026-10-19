@@ -7,11 +7,10 @@ import { join } from 'node:path'
 
 process.env.ENG_PROTOCOL_RETRY_BASE_MS = '1'
 const { AdaptiveLimiter, AdaptiveRegistry, LatencyTracker, classifyError, withRetry } = await import('../lib/adaptive.js')
-const { cancelCompile, compileSkill, graphFor, refreshSkills, skillPrefix } = await import('../lib/compiler.js')
+const { cancelCompile, compileSkill, compileStatusFor, graphFor, memoryParts, refreshSkills, settleCompiles, stopCompiles, wantSkill } = await import('../lib/compiler.js')
 const { normalizeConfig, saveUserSettings } = await import('../lib/config.js')
 const { evaluateDecision } = await import('../lib/decide.js')
 const { BUILTIN_CARDS } = await import('../lib/cards.js')
-const { cachePath } = await import('../lib/store.js')
 const { compileSummary } = await import('../lib/dashboard.js')
 
 const route = { provider: 'mock', model: 'mock' }
@@ -55,11 +54,6 @@ const longSkill = (marker = 'END') => ({
   name: 'long', path: '/s/long/SKILL.md', hash: 'h',
   content: ['# One', 'a'.repeat(1800), '## Two', 'b'.repeat(1800), '## Three', 'c'.repeat(1800), `## Four\n${marker}`].join('\n'),
 })
-const smallParts = () => {
-  const control = new AdaptiveRegistry().for('compiler', route)
-  control.size.value = 2000
-  return control
-}
 
 test('errors are classified for retry and explained in plain language', () => {
   assert.equal(classifyError(Object.assign(new Error('slow down'), { status: 429, retryAfterMs: 2000 })).kind, 'rate-limit')
@@ -128,18 +122,21 @@ test('a skill keeps every obligation: no card budget exists any more', async () 
   assert.ok(!graph.warnings.some((warning) => warning.includes('预算')))
 })
 
-test('output cut at the model cap splits the part instead of failing', async () => {
-  const control = new AdaptiveRegistry().for('compiler', route)
+test('output cut at the model cap splits the part, remembers the split, and never resends it whole', async () => {
   const llm = fakeLlm((prompt) => bodyOf(prompt).length > 3000
-    ? { text: '{"entry":{"when":"w","points":["a"', finish: 'max-tokens' }
+    ? { text: '{"cards":[{"id":"x"', finish: 'max-tokens' }
     : compiled(prompt))
   const skill = longSkill()
-  const graph = await compileSkill(llm, route, skill, config, undefined, { control })
+  const parts = memoryParts()
+  const graph = await compileSkill(llm, route, skill, config, undefined, { parts })
   assert.ok(graph.coverage.splits >= 1, 'the oversized part was halved')
   const accepted = llm.prompts.map((item) => bodyOf(item.prompt)).filter((body) => body.length <= 3000)
   assert.equal(accepted.reduce((sum, body) => sum + body.length, 0), skill.content.length, 'every character still reaches the compiler')
   assert.ok(accepted.every((body) => skill.content.includes(body)))
-  assert.ok(control.size.current < 24000, 'later skills start with a smaller part size')
+  const again = fakeLlm(() => { throw new Error('no model call expected') })
+  const resumed = await compileSkill(again, route, skill, config, undefined, { parts })
+  assert.equal(again.prompts.length, 0, 'the split and both halves resume from their checkpoints')
+  assert.equal(resumed.cards.length, graph.cards.length)
 })
 
 test('transient compile failures are retried with progress reported', async () => {
@@ -156,37 +153,37 @@ test('transient compile failures are retried with progress reported', async () =
 })
 
 test('an interrupted multi-part compile resumes from its checkpoint', async () => {
-  const checkpoint = { parts: {} }
+  const parts = memoryParts()
   const skill = longSkill()
   const failing = fakeLlm((prompt) => {
     if (bodyOf(prompt).includes('END')) throw Object.assign(new Error('bad key'), { status: 401 })
     return compiled(prompt)
   })
-  await assert.rejects(compileSkill(failing, route, skill, config, undefined, { control: smallParts(), checkpoint }), /bad key/)
-  const saved = Object.keys(checkpoint.parts).length
+  await assert.rejects(compileSkill(failing, route, skill, config, undefined, { parts, partChars: 2000 }), /bad key/)
+  const saved = parts.parts.size
   assert.ok(saved >= 2, 'finished parts were checkpointed before the failure')
   const healthy = fakeLlm((prompt) => compiled(prompt))
-  const graph = await compileSkill(healthy, route, skill, config, undefined, { control: smallParts(), checkpoint })
+  const graph = await compileSkill(healthy, route, skill, config, undefined, { parts, partChars: 2000 })
   assert.equal(healthy.prompts.length, 1, 'only the failed part is sent again')
   assert.match(bodyOf(healthy.prompts[0].prompt), /END/)
   assert.equal(graph.coverage.resumedParts, saved)
 })
 
 test('editing the end of a skill recompiles only the changed part', async () => {
-  const checkpoint = { parts: {} }
+  const parts = memoryParts()
   const first = fakeLlm((prompt) => compiled(prompt))
-  await compileSkill(first, route, longSkill('END'), config, undefined, { control: smallParts(), checkpoint })
+  await compileSkill(first, route, longSkill('END'), config, undefined, { parts, partChars: 2000 })
   const second = fakeLlm((prompt) => compiled(prompt))
-  const graph = await compileSkill(second, route, longSkill('CHANGED'), config, undefined, { control: smallParts(), checkpoint })
+  const graph = await compileSkill(second, route, longSkill('CHANGED'), config, undefined, { parts, partChars: 2000 })
   assert.equal(second.prompts.length, 1)
   assert.match(bodyOf(second.prompts[0].prompt), /CHANGED/)
   assert.ok(graph.coverage.resumedParts >= 2)
 })
 
-/** A minimal state + ctx around refreshSkills, with a cache dir of its own. */
+/** A minimal state + ctx around refreshSkills, with a state directory of its own. */
 async function project({ reply, skills = ['alpha', 'beta'], content = (name) => `# ${name}\nbody` }) {
   const root = await mkdtemp(join(tmpdir(), 'eng-adaptive-'))
-  const cfg = normalizeConfig({ stateDir: root }, root)
+  const cfg = normalizeConfig({ stateDir: join(root, 'state') }, root)
   const llm = fakeLlm(reply)
   const host = { skills, content }
   const ctx = {
@@ -196,17 +193,42 @@ async function project({ reply, skills = ['alpha', 'beta'], content = (name) => 
       async get(name) { return { name, description: name, path: `/s/${name}/SKILL.md`, content: host.content(name) } },
     },
   }
-  const state = { config: cfg, graphs: new Map(), compileStatus: new Map(), compileAbort: new AbortController() }
+  const state = { config: cfg, graphs: new Map(), compileAbort: new AbortController() }
   const agent = { options: route, session: { id: 's', header: { cwd: root } } }
-  const status = () => state.skillViews.get(agent).compileStatus.get(root)
-  return { root, cfg, llm, host, ctx, state, agent, status, done: () => rm(root, { recursive: true, force: true }) }
+  const status = (who = agent) => compileStatusFor(state, who, root)
+  const done = async () => {
+    stopCompiles(state)
+    await rm(root, { recursive: true, force: true })
+  }
+  return { root, cfg, llm, host, ctx, state, agent, status, done }
 }
+
+const upstream502 = () => { throw Object.assign(new Error('upstream 502'), { status: 502 }) }
+const badKey = () => { throw Object.assign(new Error('bad key'), { status: 401 }) }
+
+test('reading a catalog compiles nothing; a skill compiles once the agent uses it', async () => {
+  const env = await project({ reply: (prompt) => compiled(prompt) })
+  try {
+    const graph = await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
+    assert.equal(env.llm.prompts.length, 0, 'no model call for skills nobody loaded')
+    assert.deepEqual(graph.graphs.map((skill) => [skill.name, skill.compiled, skill.cards.length]), [['alpha', false, 0], ['beta', false, 0]])
+    assert.ok(graph.graphs.every((skill) => skill.entry.entry), 'entry cards come from the catalog alone')
+    assert.equal(env.status().skills.alpha.state, 'standby')
+    assert.match(compileSummary(env.status()), /用到时再准备/)
+    await wantSkill(env.ctx, env.state, env.agent, 'alpha')
+    await settleCompiles(env.state, env.agent)
+    assert.equal(env.llm.prompts.length, 1)
+    assert.equal(env.status().skills.alpha.state, 'done')
+    assert.equal(env.status().skills.beta.state, 'standby')
+  } finally { await env.done() }
+})
 
 test('a failed skill keeps a hint, schedules a retry, and a retry compiles only it', async () => {
   let broken = true
-  const env = await project({ reply: (prompt) => (broken && prompt.includes('SKILL NAME: beta') ? (() => { throw Object.assign(new Error('upstream 502'), { status: 502 }) })() : compiled(prompt)) })
+  const env = await project({ reply: (prompt) => (broken && prompt.includes('SKILL NAME: beta') ? upstream502() : compiled(prompt)) })
   try {
-    await refreshSkills(env.ctx, env.state, env.agent)
+    for (const name of ['alpha', 'beta']) void wantSkill(env.ctx, env.state, env.agent, name)
+    await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
     const entry = env.status().skills.beta
     assert.equal(entry.state, 'failed')
     assert.equal(entry.kind, 'server')
@@ -216,27 +238,32 @@ test('a failed skill keeps a hint, schedules a retry, and a retry compiles only 
     assert.match(compileSummary(env.status()), /1 个 skill 没准备好，其余 1 个正常，.* 会自动再试/)
     broken = false
     const before = env.llm.prompts.length
-    const graph = await refreshSkills(env.ctx, env.state, env.agent, { queue: true })
-    assert.equal(env.llm.prompts.length - before, 1, 'the cached skill is not recompiled')
-    assert.equal(graph.graphs.length, 2)
+    const graph = await refreshSkills(env.ctx, env.state, env.agent, { queue: true, wait: true })
+    assert.equal(env.llm.prompts.length - before, 1, 'the compiled skill is not compiled again')
+    assert.equal(graph.graphs.filter((skill) => skill.compiled).length, 2)
     assert.equal(env.status().skills.beta.state, 'done')
-    const cache = JSON.parse(await readFile(cachePath(env.cfg, env.root), 'utf8'))
-    assert.deepEqual(Object.keys(cache.failures), [], 'the failure record is cleared on success')
+    assert.equal(env.status().retryAt, undefined, 'the failure record is cleared on success')
   } finally { await env.done() }
 })
 
 test('a changed skill that fails to recompile keeps guarding with its last good graph', async () => {
   let fail = false
-  const env = await project({ skills: ['alpha'], reply: (prompt) => (fail ? (() => { throw Object.assign(new Error('bad key'), { status: 401 }) })() : compiled(prompt)) })
+  const env = await project({ skills: ['alpha'], reply: (prompt) => (fail ? badKey() : compiled(prompt)) })
   try {
-    await refreshSkills(env.ctx, env.state, env.agent)
+    void wantSkill(env.ctx, env.state, env.agent, 'alpha')
+    await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
     fail = true
     env.host.content = () => '# alpha\nchanged body'
-    const graph = await refreshSkills(env.ctx, env.state, env.agent)
+    const graph = await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
     assert.equal(graph.graphs.length, 1)
     assert.equal(graph.graphs[0].stale, true)
+    assert.ok(graph.graphs[0].cards.length > 0, 'the last good obligations keep guarding')
+    assert.equal(env.status().skills.alpha.state, 'failed')
     assert.equal(env.status().skills.alpha.stale, true)
     assert.equal(env.status().skills.alpha.nextRetryAt, undefined, 'a permanent failure does not auto-retry')
+    // Another session starting now finds the last good compile on disk as well.
+    const other = { options: route, session: { id: 's2', header: { cwd: env.root } } }
+    assert.equal((await refreshSkills(env.ctx, env.state, other)).graphs[0].stale, true)
   } finally { await env.done() }
 })
 
@@ -245,40 +272,55 @@ test('cancel stops a compile and keeps finished parts for the next run', async (
   const gate = new Promise((resolve) => { release = resolve })
   const env = await project({ skills: ['alpha', 'beta'], reply: async (prompt) => { if (prompt.includes('SKILL NAME: beta')) await gate; return compiled(prompt) } })
   try {
-    const running = refreshSkills(env.ctx, env.state, env.agent)
+    for (const name of ['alpha', 'beta']) void wantSkill(env.ctx, env.state, env.agent, name)
+    await refreshSkills(env.ctx, env.state, env.agent)
     await sleep(30)
     assert.equal(cancelCompile(env.state, env.agent), true)
     release()
-    await running
+    await settleCompiles(env.state, env.agent)
     assert.equal(env.status().cancelled, true)
     assert.equal(env.status().skills.beta.state, 'cancelled')
+    assert.equal(env.status().skills.alpha.state, 'done')
     const before = env.llm.prompts.length
-    await refreshSkills(env.ctx, env.state, env.agent)
-    assert.equal(env.llm.prompts.length - before, 1, 'alpha finished before the cancel and stays cached')
+    await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
+    assert.equal(env.llm.prompts.length, before, 'a paused skill stays paused across a refresh')
+    await refreshSkills(env.ctx, env.state, env.agent, { queue: true, wait: true })
+    assert.equal(env.llm.prompts.length - before, 1, 'retry resumes only the paused skill')
+    assert.equal(env.status().skills.beta.state, 'done')
   } finally { await env.done() }
 })
 
-test('a legacy graph without budget losses is migrated instead of recompiled', async () => {
-  const env = await project({ skills: ['alpha'], reply: (prompt) => compiled(prompt) })
+test('compiles are shared by content: two agents wait on one run, other projects reuse it, no scope can delete it', async () => {
+  let release
+  const gate = new Promise((resolve) => { release = resolve })
+  const env = await project({ skills: ['alpha'], reply: async (prompt) => { await gate; return compiled(prompt) } })
+  const elsewhere = await mkdtemp(join(tmpdir(), 'eng-elsewhere-'))
   try {
-    await refreshSkills(env.ctx, env.state, env.agent)
-    const path = cachePath(env.cfg, env.root)
-    const cache = JSON.parse(await readFile(path, 'utf8'))
-    cache.skills.alpha.compilerVersion = 2
-    cache.skills.alpha.compileKey = 'old-key'
-    await writeFile(path, JSON.stringify(cache))
-    const before = env.llm.prompts.length
-    await refreshSkills(env.ctx, env.state, env.agent)
-    assert.equal(env.llm.prompts.length, before, 'no model call for an equivalent old graph')
-    assert.equal(env.status().migrated, 1)
-    cache.skills.alpha.omissions = [{ id: 'x', reason: 'budget' }]
-    // Old caches never carried part checkpoints.
-    cache.partials = {}
-    await writeFile(path, JSON.stringify(cache))
-    await refreshSkills(env.ctx, env.state, env.agent)
-    assert.equal(env.llm.prompts.length, before + 1, 'a graph that lost cards to the old budget is recompiled')
-    assert.equal(graphFor(env.state, env.root, env.agent).graphs[0].entry.id, `${skillPrefix('alpha')}_entry`)
-  } finally { await env.done() }
+    // A session and its subagent load the same skill at the same time.
+    const subagent = { options: route, session: { id: 'sub', header: { cwd: env.root } } }
+    for (const agent of [env.agent, subagent]) void wantSkill(env.ctx, env.state, agent, 'alpha')
+    await Promise.all([refreshSkills(env.ctx, env.state, env.agent), refreshSkills(env.ctx, env.state, subagent)])
+    await sleep(20)
+    release()
+    await Promise.all([settleCompiles(env.state, env.agent), settleCompiles(env.state, subagent)])
+    assert.equal(env.llm.prompts.length, 1, 'one model run for both agents')
+    assert.ok(graphFor(env.state, env.root, subagent).graphs[0].compiled)
+    // A user-level skill opened from another project is not compiled again.
+    const visitor = { options: route, session: { id: 'v', header: { cwd: elsewhere } } }
+    void wantSkill(env.ctx, env.state, visitor, 'alpha')
+    assert.ok((await refreshSkills(env.ctx, env.state, visitor, { wait: true })).graphs[0].compiled)
+    assert.equal(env.llm.prompts.length, 1, 'no recompile per project')
+    // An agent whose scope lists other skills leaves everyone else's compiles alone.
+    env.host.skills = ['beta']
+    await refreshSkills(env.ctx, env.state, visitor, { wait: true })
+    env.host.skills = ['alpha']
+    const late = { options: route, session: { id: 'late', header: { cwd: env.root } } }
+    assert.ok((await refreshSkills(env.ctx, env.state, late)).graphs[0].compiled, 'still stored')
+    assert.equal(env.llm.prompts.length, 1)
+  } finally {
+    await rm(elsewhere, { recursive: true, force: true })
+    await env.done()
+  }
 })
 
 test('the judge splits a candidate set whose answer would not fit, and judges every card', async () => {

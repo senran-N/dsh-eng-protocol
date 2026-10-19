@@ -108,7 +108,6 @@ test('a dependent is excluded when its prerequisite card is invalid', () => {
 test('a multi-part skill reports total extracted cards, not just part one', async () => {
   const splitConfig = normalizeConfig({}, process.cwd())
   const control = new AdaptiveRegistry().for('compiler', { provider: 'mock', model: 'mock' })
-  control.size.value = control.size.min
   const long = `# Head\n${'x'.repeat(2500)}\n## Tail\nend`
   const llm = {
     async prepareCall() {
@@ -127,10 +126,13 @@ test('a multi-part skill reports total extracted cards, not just part one', asyn
       }
     },
   }
-  const graph = await compileSkill(llm, { provider: 'mock', model: 'mock' }, { name: 'long', content: long, path: '/s/SKILL.md', hash: 'h' }, splitConfig, undefined, { control })
+  const graph = await compileSkill(llm, { provider: 'mock', model: 'mock' }, { name: 'long', content: long, path: '/s/SKILL.md', hash: 'h' }, splitConfig, undefined, { control, partChars: 1500 })
   assert.ok(graph.coverage.parts > 1, 'the fixture must actually split into parts')
   assert.equal(graph.extractedCards, graph.coverage.extractedCards, 'top-level count must match the coverage total')
   assert.ok(graph.extractedCards > 2, 'every segment contributes its extracted cards')
+  // The same obligation extracted by every part is kept once.
+  assert.equal(graph.cards.length, 2)
+  assert.equal(graph.coverage.duplicates, graph.extractedCards - 2)
 })
 
 test('runtime settings are written as top-level keys, not a runtime section', async () => {

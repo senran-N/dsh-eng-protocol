@@ -47,25 +47,44 @@ test('classifyTool distinguishes edit, check and risky commands', () => {
   assert.deepEqual(actionTriggers(classifyTool('write', { path: 'src/a.test.ts' }), 1), ['edit', 'test_edit'])
 })
 
-test('compiled skill graph is validated and linked to built-ins', () => {
-  const skill = { name: 'android-ui', description: 'Android UI', path: 'C:/skills/android-ui/SKILL.md', hash: 'abc', content: '# UI\nUse Material.' }
+test('compiled obligations are grounded in the skill text and linked to built-ins', () => {
+  const skill = {
+    name: 'android-ui', description: 'Android UI', path: 'C:/skills/android-ui/SKILL.md', hash: 'abc',
+    content: '# UI\nUse Material.\n## Layout\nPrefer ConstraintLayout for nested screens.\n## A11y\nEvery interactive control needs a contentDescription.',
+  }
   const graph = normalizeCompiled({
-    entry: { title: 'Android UI', when: 'Android screen work', notApplicable: 'Flutter work', points: ['Use Material 3', 'Check both themes'] },
+    entry: { title: 'ignored', when: 'an entry from the model is not used', points: ['x', 'y'] },
     cards: [
-      { id: 'layout', title: 'Layout constraints', when: 'editing layout XML', triggers: ['edit'], satisfiedWhen: 'layout builds', rules: ['Prefer ConstraintLayout'], source: 'SKILL.md#Layout' },
-      { id: 'a11y', title: 'Accessibility', when: 'adding interactive controls', triggers: ['edit', 'settle'], satisfiedWhen: 'content descriptions exist', rules: ['Add contentDescription'], source: 'SKILL.md#A11y' },
+      { id: 'layout', title: 'Layout constraints', quote: 'Prefer ConstraintLayout for nested screens.', when: 'editing layout XML', triggers: ['edit'], satisfiedWhen: 'layout builds', rules: ['Prefer ConstraintLayout'], paths: ['res/layout/**', 'C:\\bad\0'] },
+      { id: 'a11y', title: 'Accessibility', quote: 'every interactive control needs a **contentDescription**', when: 'adding interactive controls', triggers: ['edit', 'settle'], satisfiedWhen: 'content descriptions exist', rules: ['Add contentDescription'], checkpoint: true, entry: true, critical: true },
+      { id: 'invented', title: 'Invented', quote: 'Always use Jetpack Compose.', when: 'editing screens', triggers: ['edit'], satisfiedWhen: 'compose used', rules: ['Use Compose'], checkpoint: true },
     ],
     relations: [
       { type: 'requires', source: 'layout', target: 'a11y', reason: 'layout first' },
       { type: 'covers', source: 'a11y', target: 'verify', reason: 'same check' },
     ],
-  }, skill, normalizeConfig({}, process.cwd()))
-  assert.equal(graph.entry.id, `skill_${slug('android-ui')}_entry`)
-  assert.equal(graph.cards.length, 2)
+  }, skill)
+  const [layout, a11y, invented] = graph.cards
+  assert.equal(graph.cards.length, 3)
+  // A found quote yields the source's own words and the lines they really occupy.
+  assert.equal(layout.grounded, true)
+  assert.equal(layout.quote, 'Prefer ConstraintLayout for nested screens.')
+  assert.deepEqual([layout.sourceRef.startLine, layout.sourceRef.endLine, layout.sourceRef.basis], [4, 4, 'verified-quote'])
+  assert.deepEqual(layout.match, { paths: ['res/layout/**'], commands: [] }, 'an invalid glob is dropped, not fatal')
+  // Case and Markdown emphasis do not break a verbatim quote; hostile flags are not copied.
+  assert.equal(a11y.grounded, true)
+  assert.equal(a11y.quote, 'Every interactive control needs a contentDescription')
+  assert.equal(a11y.checkpoint, true)
+  assert.deepEqual([a11y.entry, a11y.critical], [false, false])
+  // An invented sentence stays advisory and can never be a checkpoint.
+  assert.equal(invented.grounded, false)
+  assert.equal(invented.checkpoint, undefined)
+  assert.equal(invented.sourceRef.basis, 'input-range')
+  assert.ok(graph.warnings.some((warning) => warning.includes('只作参考提醒')))
   assert.ok(graph.relations.some((edge) => edge.type === 'covers' && edge.target === 'verify'))
   const merged = buildGraph('C:/project', new Map([['android-ui', graph]]))
-  assert.ok(merged.cards.length > BUILTIN_CARDS.length)
-  assert.ok(merged.relations.length >= 1)
+  assert.ok(merged.cards.some((card) => card.id === `skill_${slug('android-ui')}_entry` && card.entry))
+  assert.ok(merged.relations.some((edge) => edge.type === 'contains'))
   assert.ok(triggeredCards(merged.cards, ['edit']).length > 0)
 })
 
@@ -140,41 +159,47 @@ test('patch tools expose the files they touch', () => {
   assert.deepEqual(actionTriggers(envelope, 1), ['edit', 'test_edit', 'dependency'])
 })
 
-test('every triggered card is a candidate; order only decides batches', () => {
-  const skills = Array.from({ length: 10 }, (_, index) => `skill-${index}`)
-  const graphs = new Map(skills.map((name) => {
-    const skill = { name, description: name, path: `C:/skills/${name}/SKILL.md`, hash: name, content: '' }
+test('routing judges loaded skills plus a relevant shortlist; obligations need scope and matching files', () => {
+  const topics = ['android', 'postgres', 'docx', 'pptx', 'xlsx', 'pdf', 'kotlin', 'swift', 'terraform', 'docker', 'react', 'vue']
+  const graphs = new Map(topics.map((name) => {
+    const skill = { name, description: `Guidance for ${name} work`, path: `C:/skills/${name}/SKILL.md`, hash: name, content: '# Rules\nEdit rule text here.\nCheck rule text here.' }
     const graph = normalizeCompiled({
-      entry: { title: `Skill ${name}`, when: name === 'skill-6' ? 'android layout xml work' : `work on ${name}`, points: ['a', 'b'] },
       cards: [
-        { id: 'edit_rule', title: 'Edit rule', when: 'editing', triggers: ['edit'], satisfiedWhen: 'x', rules: ['do'] },
-        { id: 'check_rule', title: 'Check rule', when: 'checking', triggers: ['check_start'], satisfiedWhen: 'x', rules: ['do'] },
+        { id: 'edit_rule', title: 'Edit rule', quote: 'Edit rule text here.', when: 'editing', triggers: ['edit'], satisfiedWhen: 'x', rules: ['do'], ...(name === 'postgres' ? { paths: ['**/*.sql'] } : {}) },
+        { id: 'check_rule', title: 'Check rule', quote: 'Check rule text here.', when: 'checking', triggers: ['check_start'], satisfiedWhen: 'x', rules: ['do'] },
       ],
-    }, skill, normalizeConfig({}, process.cwd()))
-    return [name, graph]
+    }, skill)
+    return [name, { summary: skill, compiled: graph }]
   }))
   const cards = buildGraph('C:/project', graphs).cards
   const entryOf = (name) => `skill_${slug(name)}_entry`
+  const entries = (list) => list.filter((card) => card.entry).map((card) => card.id)
 
-  const turn = candidateCards(cards, { triggers: ['turn'] })
-  assert.equal(turn.filter((card) => card.entry).length, 10)
-  assert.equal(turn.filter((card) => !card.skill).length, BUILTIN_CARDS.filter((card) => card.triggers.includes('turn')).length)
-
-  const loaded = candidateCards(cards, { triggers: ['skill'], invoked: 'skill-4' })
-  assert.deepEqual(loaded.map((card) => card.id), [entryOf('skill-4')])
-
-  const edit = candidateCards(cards, { triggers: ['edit'], active: new Set(['skill-2']) })
-  assert.deepEqual(edit.filter((card) => card.skill).map((card) => card.id), ['skill_skill_2_edit_rule'])
-
-  // Every active skill's sections are asked; nothing is cut to a budget.
-  const shared = candidateCards(cards, { triggers: ['edit', 'check_start'], active: new Set(skills), invoked: '' })
-  assert.equal(shared.filter((card) => card.skill).length, 20)
-  assert.equal(new Set(shared.slice(-10).map((card) => card.skill)).size, 10, 'skills take turns, so a batch boundary never starves the last skills')
-
-  // Ordering: active skills first, then entries that overlap the request; critical built-ins lead.
-  const ordered = candidateCards(cards, { triggers: ['turn'], active: new Set(['skill-9']), query: 'fix the android layout' })
-  assert.deepEqual(ordered.filter((card) => card.entry).slice(0, 2).map((card) => card.id), [entryOf('skill-9'), entryOf('skill-6')])
-  assert.ok(ordered[0].critical)
+  // More skills than the shortlist and nothing relevant: no skill is routed, built-ins still are.
+  const quiet = candidateCards(cards, { triggers: ['turn'], query: '实现一个新功能' })
+  assert.deepEqual(entries(quiet), [])
+  assert.equal(quiet.filter((card) => !card.skill).length, BUILTIN_CARDS.filter((card) => card.triggers.includes('turn')).length)
+  assert.ok(quiet[0].critical, 'critical built-ins lead')
+  // Loaded skills are always re-checked; named and relevant skills join them.
+  const routed = entries(candidateCards(cards, { triggers: ['turn'], active: new Set(['terraform']), query: 'fix the android layout, then use docker; reactive streams' }))
+  assert.equal(routed[0], entryOf('terraform'))
+  assert.deepEqual(new Set(routed), new Set([entryOf('terraform'), entryOf('android'), entryOf('docker')]), 'a name inside another word is not a mention')
+  // A skill load is not a judge question: it activates directly.
+  assert.deepEqual(entries(candidateCards(cards, { triggers: ['skill'], invoked: 'docx' })), [])
+  // A small catalog is judged in full.
+  assert.equal(entries(candidateCards(buildGraph('C:/p', new Map([...graphs].slice(0, 3))).cards, { triggers: ['turn'] })).length, 3)
+  // Obligations only for loaded skills...
+  const edit = candidateCards(cards, { triggers: ['edit'], active: new Set(['android']), action: { kind: 'edit', path: 'src/a.ts' } })
+  assert.deepEqual(edit.filter((card) => card.skill).map((card) => card.id), ['skill_android_edit_rule'])
+  // ...and only when their file predicates match the action (or, without one, the session's files).
+  const sql = (scope) => candidateCards(cards, { triggers: ['edit'], active: new Set(['postgres']), ...scope }).filter((card) => card.skill).map((card) => card.id)
+  assert.deepEqual(sql({ action: { kind: 'edit', path: 'src/a.ts' } }), [])
+  assert.deepEqual(sql({ action: { kind: 'edit', path: 'D:\\repo\\db\\001_init.sql' } }), ['skill_postgres_edit_rule'])
+  assert.deepEqual(sql({ files: ['db/002.sql'] }), ['skill_postgres_edit_rule'])
+  // Every loaded skill's obligations are asked; nothing is cut to a budget, and skills take turns.
+  const shared = candidateCards(cards, { triggers: ['edit', 'check_start'], active: new Set(topics), action: { kind: 'edit', path: 'src/a.ts' } })
+  assert.equal(shared.filter((card) => card.skill).length, 23)
+  assert.equal(new Set(shared.slice(-10).map((card) => card.skill)).size, 10, 'a batch boundary never starves the last skills')
 })
 
 test('rendered guidance cannot be closed early by card text', () => {
@@ -364,7 +389,8 @@ test('assessment selection applies threshold, covers and cooldown', () => {
     { id: 'c', priority: 1, critical: false, triggers: ['edit'] },
   ]
   const config = normalizeConfig({ maxCards: 2, cooldownSteps: 2 }, process.cwd())
-  const state = { decisionTick: 1, cooldowns: new Map() }
+  // Cooldowns count real steps of the turn, not judge calls.
+  const state = { step: 1, cooldowns: new Map() }
   const assessments = {
     a: { state: 'needed', confidence: 0.9 },
     b: { state: 'needed', confidence: 0.8 },
@@ -374,10 +400,17 @@ test('assessment selection applies threshold, covers and cooldown', () => {
   assert.deepEqual(first.selected.map((card) => card.id), ['a', 'b'])
   // Selection alone does not deliver a reminder; only delivery starts cooldown.
   assert.equal(state.cooldowns.size, 0)
-  for (const card of first.selected) state.cooldowns.set(card.id, state.decisionTick)
-  state.decisionTick = 2
-  const second = selectAssessments({ ...assessments, b: { state: 'needed', confidence: 0.8 } }, cards, [], config, state)
-  assert.deepEqual(second.selected.map((card) => card.id), ['a', 'c'])
+  for (const card of first.selected) state.cooldowns.set(card.id, state.step)
+  // Any number of judgments within the same step keeps b cooling.
+  const sameStep = selectAssessments(assessments, cards, [], config, state)
+  assert.deepEqual(sameStep.selected.map((card) => card.id), ['a', 'c'])
+  state.step = 3
+  assert.deepEqual(selectAssessments(assessments, cards, [], config, state).selected.map((card) => card.id), ['a', 'b', 'c'], 'two steps later b is due again')
+  // A loaded skill's entry only decides scope; a skill not loaded gets a load nudge.
+  const entry = { id: 'skill_x_entry', entry: true, skill: 'x', priority: 2, triggers: ['turn'] }
+  const verdict = { skill_x_entry: { state: 'needed', confidence: 0.9 } }
+  assert.deepEqual(selectAssessments(verdict, [entry], [], config, { step: 1, cooldowns: new Map(), active: new Set(['x']) }).selected, [])
+  assert.deepEqual(selectAssessments(verdict, [entry], [], config, { step: 1, cooldowns: new Map(), active: new Set() }).selected.map((card) => card.id), ['skill_x_entry'])
 })
 
 test('ledger turns live events into triggers and failure streaks', () => {

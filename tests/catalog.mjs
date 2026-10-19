@@ -7,9 +7,9 @@ import { join } from 'node:path'
 
 process.env.ENG_PROTOCOL_RETRY_BASE_MS = '1'
 const { fitReasoning, callJson } = await import('../lib/model.js')
-const { modelsPayload } = await import('../lib/dashboard.js')
+const { compileSummary, modelsPayload } = await import('../lib/dashboard.js')
 const { Aftermath } = await import('../lib/aftermath.js')
-const { refreshSkills } = await import('../lib/compiler.js')
+const { compileStatusFor, refreshSkills, wantSkill } = await import('../lib/compiler.js')
 const { normalizeConfig } = await import('../lib/config.js')
 const { classifyError } = await import('../lib/adaptive.js')
 
@@ -122,17 +122,19 @@ test('the trail carries each decision\'s aftermath and the compile view gets par
     assert.equal(trail.items[0].after.actions[0].callId, 'c')
 
     const llm = { async prepareCall(cfg) { return { config: cfg, async *stream() {
-      yield { type: 'text-delta', text: JSON.stringify({ entry: { when: 'w', notApplicable: 'n', points: ['a', 'b'] }, cards: [{ id: 'c', title: 'c', when: 'x', triggers: ['edit'], satisfiedWhen: 'y', rules: ['do'] }], relations: [] }) }
+      yield { type: 'text-delta', text: JSON.stringify({ cards: [{ id: 'c', title: 'c', quote: 'Keep the body intact.', when: 'x', triggers: ['edit'], satisfiedWhen: 'y', rules: ['do'] }], relations: [] }) }
       yield { type: 'finish', reason: { kind: 'stop' } }
     } } } }
-    const state = { config, graphs: new Map(), compileStatus: new Map(), compileAbort: new AbortController() }
+    const state = { config, graphs: new Map(), compileAbort: new AbortController() }
     const agent = { options: { provider: 'mock', model: 'mock' }, session: { id: 's', header: { cwd: root } } }
-    const ctx = { get: (name) => name === 'llm' ? llm : { async list() { return [{ name: 'alpha', description: 'a' }] }, async get() { return { name: 'alpha', description: 'a', content: '# A\nbody' } } } }
-    await refreshSkills(ctx, state, agent)
-    const status = state.skillViews.get(agent).compileStatus.get(root)
+    const body = '# A\nKeep the body intact.'
+    const ctx = { get: (name) => name === 'llm' ? llm : { async list() { return [{ name: 'alpha', description: 'a' }] }, async get() { return { name: 'alpha', description: 'a', content: body } } } }
+    void wantSkill(ctx, state, agent, 'alpha')
+    await refreshSkills(ctx, state, agent, { wait: true })
+    const status = compileStatusFor(state, agent, root)
     assert.deepEqual(status.skills.alpha.segments.map((segment) => segment.state), ['done'])
-    assert.equal(status.skills.alpha.length, '# A\nbody'.length)
-    assert.ok(status.log.some((item) => item.skill === 'alpha' && /完成，生成 2 条规则/.test(item.text)))
-    assert.ok(status.log.some((item) => /全部准备好了/.test(item.text)))
+    assert.equal(status.skills.alpha.length, body.length)
+    assert.ok(status.log.some((item) => item.skill === 'alpha' && /准备好了，整理出 1 条规则/.test(item.text)))
+    assert.equal(compileSummary(status), '1 个 skill 全部就绪')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

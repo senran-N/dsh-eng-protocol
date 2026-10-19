@@ -76,6 +76,7 @@ assert.ok(commands.some((item) => item.name === 'protocol'))
 assert.ok(routes.some((route) => route.path === '/eng-protocol'))
 assert.ok(handlers.has('agent/pre-step'))
 assert.ok(handlers.has('tools/pre-execute'))
+assert.ok(handlers.has('tools/post-execute'), 'advisory verdicts ride the tool result')
 assert.ok(handlers.has('agent/turn-stopping'))
 
 const agent = {

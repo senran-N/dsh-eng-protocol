@@ -232,7 +232,7 @@
     research: '查资料', delegate: '交给子任务',
   };
   var ACTION = { edit: '改', read: '读', command: '运行', skill: '用 skill', research: '查', delegate: '交给子任务', other: '调用' };
-  var SKILL_STATE = { cached: ['已就绪', 'ok'], done: ['已就绪', 'ok'], queued: ['等待中', 'plain'], compiling: ['编译中', 'sel'], retrying: ['稍后再试', 'warn'], failed: ['没准备好', 'bad'], cancelled: ['已暂停', 'warn'] };
+  var SKILL_STATE = { cached: ['已就绪', 'ok'], done: ['已就绪', 'ok'], standby: ['用到时再准备', 'plain'], queued: ['等待中', 'plain'], compiling: ['编译中', 'sel'], retrying: ['稍后再试', 'warn'], failed: ['没准备好', 'bad'], cancelled: ['已暂停', 'warn'] };
   var TIME_SERIES = [
     { key: 'delivered', label: '提醒或拦下', color: 'var(--viz-1)' },
     { key: 'shadow', label: '影子模式下本会提醒', color: 'var(--viz-2)' },
@@ -467,7 +467,7 @@
     } else if(d.config.shadow){
       tone = 'warn'; title = '影子模式：只观察，不打扰'; text = '照常检查和记录，但不提醒、不拦下，用来和正常模式对比效果。' + activity;
     } else {
-      text = (d.skills.length ? d.skills.length + ' 个 skill 已就绪，' : '') + '共 ' + num(d.graph.cards.length) + ' 条规则在守护。' + activity;
+      text = (d.skills.length && c.summary ? c.summary + '，' : '') + '共 ' + num(d.graph.cards.length) + ' 条规则在守护。' + activity;
     }
     var hero = $('hero'); hero.dataset.tone = tone;
     $('hero-orb').innerHTML = ICON[tone === 'good' ? 'ok' : tone === 'bad' || tone === 'warn' ? 'warn' : tone === 'off' ? 'off' : 'info'];
@@ -755,11 +755,11 @@
   }
 
   // ---- skills & compile ------------------------------------------------------------------
-  async function compileAction(action, name, button){
+  async function compileAction(action, name, button, fresh){
     if(button) button.disabled = true;
     try{
       await postJson('/api/compile', { action: action, name: name });
-      toast(action === 'cancel' ? '已暂停。做完的部分都保存了。' : action === 'retry' ? '正在重试，上次做完的部分不会重做。' : (name ? '正在重新编译 ' + name : '正在重新编译全部 skill') + '，期间旧规则照常工作。');
+      toast(action === 'cancel' ? '已暂停。做完的部分都保存了。' : action === 'retry' ? '正在重试，上次做完的部分不会重做。' : fresh ? '正在准备 ' + name + '。' : (name ? '正在重新编译 ' + name : '正在重新编译全部 skill') + '，期间旧规则照常工作。');
       setTimeout(loadStats, 500);
     }catch(error){ toast('没能开始：' + message(error), 'bad'); }
     finally{ if(button) button.disabled = false; }
@@ -781,17 +781,19 @@
     if(e.state === 'compiling') return '<div class="sk-hint">' + (e.parts > 1 ? '分 ' + e.parts + ' 段处理，已完成 ' + (e.partsDone || 0) + ' 段' : '正在编译') + (e.resumedParts ? '，其中 ' + e.resumedParts + ' 段沿用上次' : '') + '</div>';
     if(e.state === 'queued') return '<div class="sk-hint">' + (e.resumable ? '上次做了一部分，会接着做' : '排队中') + '</div>';
     if(e.state === 'cancelled') return '<div class="sk-hint">已暂停，点“继续”从中断处接着做</div>';
+    if(e.state === 'standby') return '<div class="sk-hint">会话加载这个 skill 时再整理它的规则；想提前看规则可以点“现在准备”。</div>';
     return '';
   }
   function renderSkills(){
     var d = state.data, c = d.compile || {}, entries = c.skills || {}, grid = $('skills');
     var byName = new Map(d.skills.map(function(s){ return [s.name, s]; }));
     var names = Array.from(new Set(Object.keys(entries).concat(d.skills.map(function(s){ return s.name; }))));
-    var order = { failed: 0, retrying: 1, compiling: 2, queued: 3, cancelled: 4, done: 5, cached: 6 };
-    names.sort(function(a, b){ var x = (entries[a] || {}).state || 'cached', y = (entries[b] || {}).state || 'cached'; return (order[x] - order[y]) || a.localeCompare(b); });
+    var order = { failed: 0, retrying: 1, compiling: 2, queued: 3, cancelled: 4, done: 5, cached: 6, standby: 7 };
+    names.sort(function(a, b){ var x = (entries[a] || {}).state || 'cached', y = (entries[b] || {}).state || 'cached'; return ((order[x] === undefined ? 8 : order[x]) - (order[y] === undefined ? 8 : order[y])) || a.localeCompare(b); });
     var ready = names.filter(function(n){ var s = (entries[n] || { state: 'cached' }).state; return s === 'cached' || s === 'done'; }).length;
     var failed = names.filter(function(n){ return (entries[n] || {}).state === 'failed'; }).length;
-    var working = names.length - ready - failed;
+    var standby = names.filter(function(n){ return (entries[n] || {}).state === 'standby'; }).length;
+    var working = names.length - ready - failed - standby;
     $('compile-title').textContent = c.summary || (names.length ? names.length + ' 个 skill 全部就绪' : '这个项目没有 skill');
     var sub = [];
     if(c.finishedAt && !c.running) sub.push('上次编译于 ' + ago(c.finishedAt));
@@ -817,11 +819,11 @@
         + docBar(e) + skillHint(e)
         + (skill.warnings && skill.warnings.length ? '<details><summary>' + num(skill.warnings.length) + ' 条编译提示</summary><ul style="margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--muted)">' + skill.warnings.map(function(w){ return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></details>' : '')
         + '<div class="sk-meta">' + meta.map(function(m){ return '<span>' + esc(m) + '</span>'; }).join('')
-        + '<span class="acts">' + (skill.cards ? '<button class="btn sm quiet" data-show>看规则</button>' : '') + '<button class="btn sm" data-recompile>重新编译</button></span></div>';
+        + '<span class="acts">' + (skill.cards ? '<button class="btn sm quiet" data-show>看规则</button>' : '') + '<button class="btn sm" data-recompile>' + (e.state === 'standby' ? '现在准备' : '重新编译') + '</button></span></div>';
       var show = el.querySelector('[data-show]');
       if(show) show.addEventListener('click', function(){ state.cardFilter = 'skill'; state.cardQuery = name; $('search').value = name; switchView('cards'); renderCards(); });
       var re = el.querySelector('[data-recompile]');
-      re.addEventListener('click', function(){ compileAction('rebuild', name, re); });
+      re.addEventListener('click', function(){ compileAction('rebuild', name, re, e.state === 'standby' && !skill.stale); });
       grid.appendChild(el);
     });
     $('skills-empty').hidden = names.length > 0;
@@ -912,7 +914,8 @@
     var c = state.cardsById.get(id); if(!c) return;
     hideTip();
     $('detail-title').textContent = c.title;
-    $('detail-meta').innerHTML = (c.skill ? pill('来自 ' + c.skill, 'sel') : pill('通用规则', 'plain')) + (c.entry ? pill('skill 总则', 'plain') : '') + (c.critical ? pill('关键', 'warn') : '');
+    $('detail-meta').innerHTML = (c.skill ? pill('来自 ' + c.skill, 'sel') : pill('通用规则', 'plain')) + (c.entry ? pill('判断是否适用', 'plain') : '') + (c.critical ? pill('关键', 'warn') : '')
+      + (c.checkpoint ? pill('动手前检查，可拦下一次', 'warn') : '') + (c.grounded === false ? pill('原文里没找到这句话，只作参考', 'plain') : '');
     var s = c.stats || {}, f = s.followUp || {};
     var rel = state.data.graph.relations.filter(function(e){ return (e.source === id || e.target === id) && e.type !== 'contains'; });
     var relText = function(e){
@@ -920,7 +923,8 @@
       if(e.type === 'covers') return '与通用规则「' + cardTitle(e.target) + '」说的是同一件事';
       return '可与「' + cardTitle(e.source === id ? e.target : e.source) + '」互相参考';
     };
-    var rows = [['什么时候适用', c.when], ['怎样算做到', c.satisfiedWhen], ['不适用', c.notApplicable], ['在这些时候检查', trigs(c.triggers)]];
+    var scope = c.match ? [].concat(c.match.paths || [], c.match.commands || []).join('、') : '';
+    var rows = [['原文', c.grounded && c.quote ? c.quote : ''], ['什么时候适用', c.when], ['怎样算做到', c.satisfiedWhen], ['不适用', c.notApplicable], ['在这些时候检查', trigs(c.triggers)], ['只针对', scope]];
     if(c.skill && c.source) rows.push(['出处', sourceText(c)]);
     // Rule text comes from model-compiled SKILL.md files: every field is escaped.
     $('detail-body').innerHTML = '<ul class="rules">' + (c.rules || []).map(function(r){ return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>'

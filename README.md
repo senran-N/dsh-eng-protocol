@@ -43,7 +43,7 @@ DeepSeek Harness 的工程协议插件：**让 agent 在长任务里不丢掉它
           path: /eng-protocol
 ```
 
-然后重启 DSH，或让 profile 的 HMR 重新组合。打开 DSH Web 地址下的 `/eng-protocol`（例如 `http://127.0.0.1:27480/eng-protocol`），或点击页面右下角的 **⚖ Eng Protocol**。
+然后重启 DSH，或让 profile 的 HMR 重新组合。面板在会话的 **Eng Protocol** 标签页里（排在 Chat 和 Trajectory 旁边），按当前会话显示。也可以直接打开 DSH Web 地址下的 `/eng-protocol?sessionId=…`（例如 `http://127.0.0.1:27480/eng-protocol?sessionId=…`），或用 `scope=project&cwd=…` 看整个项目的汇总。
 
 > 客户端标签页由 `client.js` 在启动时组合进浏览器图；补齐客户端半边后需要完整重启一次 DSH，标签才会出现。
 
@@ -237,7 +237,7 @@ session/event ──► 本地事件检测（零模型调用）
 
 面板读取 `$DSH_HOME/storages/eng-protocol/decisions.jsonl` 和 skill 编译结果，统计本项目最近 400 次决策。日志从末尾倒着读，当前文件不够时继续读轮转出的 `.1`，文件没有变化时复用上次的解析结果，所以面板常开也不会反复读整个日志。统计文件保存卡片 ID、状态、模型给出的理由摘要和指标，不保存完整对话；理由摘要可能引用当前证据片段。卡片正文和判官理由都是模型生成的文本，面板一律按纯文本渲染。编译控制接口只接受面板自己发出的同源 JSON 请求。
 
-面板使用 DSH 的 `--dsw-*` 语义 token（`bg-layer-1/2`、`border-l1/l2`、`label-primary/secondary/tertiary`、`brand-primary-new-color`、`radius-*`）作为主样式，并为独立打开提供了同一套深色调色板。DSH 页面右下角的 **⚖ Eng Protocol** 入口会读取 `body[data-ds-dark-theme]`，把 `?theme=dark|light` 带进面板；单独打开时也可用 URL 参数或右上角 `◐` 切换。
+面板使用 DSH 的 `--dsw-*` 语义 token（`bg-layer-1/2`、`border-l1/l2`、`label-primary/secondary/tertiary`、`brand-primary-new-color`、`radius-*`）作为主样式，并为独立打开提供了同一套深色调色板。会话标签页会跟随 DSH 当前的深浅色，以 `?theme=dark|light` 带进面板；单独打开时也可用 URL 参数或右上角 `◐` 切换。
 
 ## 评估效果（A/B）
 

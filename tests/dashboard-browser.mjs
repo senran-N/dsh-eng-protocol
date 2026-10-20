@@ -8,34 +8,66 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { once } from 'node:events'
 import { normalizeConfig } from '../lib/config.js'
-import { buildGraph, normalizeCompiled } from '../lib/compiler.js'
+import { refreshSkills, settleCompiles, stopCompiles, wantSkill } from '../lib/compiler.js'
 import { registerDashboard } from '../lib/dashboard.js'
+import { appendDecision } from '../lib/store.js'
 
 const root = await mkdtemp(join(tmpdir(), 'eng-browser-'))
 // Settings persist under $DSH_HOME; keep the developer's real one untouched.
 process.env.DSH_HOME = root
 const config = normalizeConfig({ stateDir: join(root, 'state') })
-// The session's own catalog view, as the runtime builds it: 60 skills, each already compiled.
-const entries = new Map(Array.from({ length: 60 }, (_, index) => {
-  const name = `skill-${index}`
-  const summary = { name, description: `Guidance for ${name}`, path: `C:/skills/${name}/SKILL.md` }
-  const compiled = normalizeCompiled({
-    cards: ['read', 'verify'].map((id) => ({ id, title: `${name} ${id}`, when: 'edit code', rules: ['Check behavior'], triggers: ['edit'], satisfiedWhen: 'tests pass', sourceLines: [1, 2] })),
-    relations: [{ type: 'requires', source: 'read', target: 'verify' }, { type: 'covers', source: 'verify', target: 'verify' }],
-  }, { ...summary, content: '# Skill\nCheck behavior', hash: name })
-  return [name, { summary, compiled }]
-}))
-// One more skill nobody has loaded yet: listed, routable, not compiled.
-entries.set('zz-standby', { summary: { name: 'zz-standby', description: 'Not loaded yet', path: 'C:/skills/zz-standby/SKILL.md' } })
-const agent = { session: { id: 's1', header: { cwd: root } }, options: {} }
-const graph = buildGraph(root, entries)
-const state = {
-  config, graphs: new Map([[root, graph]]), lastCwd: root, lastAgentByCwd: new Map(), lastCwdBySession: new Map(),
-  agentBySession: new Map([['s1', agent]]), liveAgents: new Set([agent]),
-  skillViews: new WeakMap([[agent, { agent, cwd: root, entries, wanted: new Set(), graph, listed: true, log: [] }]]),
+// The session's own catalog, built by the real runtime: 60 skills in use and
+// compiled through a fake model, plus three more nobody has loaded yet.
+const names = Array.from({ length: 60 }, (_, index) => `skill-${index}`)
+let held, modelCalls = 0
+const llm = {
+  async prepareCall(callConfig) {
+    return {
+      config: callConfig,
+      async *stream({ messages }) {
+        modelCalls += 1
+        if (held && /^SKILL: zz-/m.test(messages[0].content[0].text)) await held.promise
+        yield {
+          type: 'text-delta',
+          text: [
+            '{"id":"read","s":[2,2],"title":"read first","on":["edit"],"done":"the files were read"}',
+            '{"id":"verify","s":[3,3],"title":"verify","on":["edit"],"done":"tests pass"}',
+            '{"rel":"requires","from":"read","to":"verify"}',
+            '{"rel":"covers","from":"verify","to":"builtin:verify"}',
+            '{"end":true}',
+          ].join('\n'),
+        }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    }
+  },
 }
+const skills = {
+  async list() { return [...names, 'zz-standby', 'zz-waiting-a', 'zz-waiting-b'].map((name) => ({ name, description: name.startsWith('zz-') ? 'Not loaded yet' : `Guidance for ${name}`, path: `C:/skills/${name}/SKILL.md` })) },
+  async get(name) { return { name, description: `Guidance for ${name}`, path: `C:/skills/${name}/SKILL.md`, content: `# ${name}\nRead the code first. Check behavior before you edit.` } },
+}
+const get = (name) => (name === 'llm' ? llm : name === 'skills' ? skills : undefined)
+const agent = { session: { id: 's1', header: { cwd: root } }, options: {} }
+const state = {
+  config, graphs: new Map(), compileAbort: new AbortController(), lastCwd: root, lastAgentByCwd: new Map(), lastCwdBySession: new Map(),
+  agentBySession: new Map([['s1', agent]]), liveAgents: new Set([agent]),
+}
+await refreshSkills({ get }, state, agent)
+for (const name of names) await wantSkill({ get }, state, agent, name)
+await settleCompiles(state, agent)
+await appendDecision(config, {
+  kind: 'decision', decisionId: 'browser-evidence', sessionId: 's1', cwd: root, boundary: 'tool', triggers: ['edit'],
+  selected: ['verify'], candidates: ['verify'], injected: true, deadlineMs: 500, inputChars: 12000,
+  evidenceCoverage: { omittedTools: 2, omittedTimeline: 4 },
+  judgeCoverage: { total: 1, answered: 1, unresolved: 0, scopeSkipped: 0 },
+  evidence: [{ ref: 'event:2', callId: 'browser-call', preview: 'All checks passed' }],
+  assessments: { verify: { state: 'satisfied', confidence: 0.9, reason: 'Checked the latest edit', evidence: [{ ref: 'event:2', quote: 'All checks passed' }] } },
+  attempts: [{ phase: 'initial', cards: ['verify'], status: 'answered', queueMs: 20, runMs: 110,
+    understanding: { goal: '修复解析器并保留断言', constraints: ['不得削弱测试'], phase: '验证', remaining: ['交付报告'], sourceRefs: ['request:1'] } },
+    { phase: 'review', cards: ['verify'], status: 'failed', queueMs: 0, runMs: 370, timeoutStage: 'model' }],
+}, { evidence: { input: { user: '完整任务条件在末尾：保留所有断言。', timeline: [{ ref: 'event:2', text: 'All checks passed' }] }, cards: [], references: [] } })
 const routes = []
-registerDashboard({ inject(_deps, callback) { callback({ webServer: { register(route) { routes.push(route) } }, effect: (fn) => fn(), on() {} }) } }, state)
+registerDashboard({ inject(_deps, callback) { callback({ webServer: { register(route) { routes.push(route) } }, effect: (fn) => fn(), on() {} }) }, get }, state)
 const server = createServer((req, res) => {
   const route = routes.find((entry) => entry.path === new URL(req.url, 'http://localhost').pathname)
   if (route) void route.handler(req, res)
@@ -79,23 +111,36 @@ try {
   await send('Page.enable')
   await send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false })
   await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/eng-protocol?sessionId=s1` })
-  await until(async () => await evaluate("document.getElementById('k-total')?.textContent === '197'"), 'dashboard data not rendered')
-  // A skill nobody loaded yet reads as waiting for use, not as work in progress.
+  await until(async () => await evaluate("document.getElementById('k-total')?.textContent === '199'"), 'dashboard data not rendered')
+  await evaluate("document.querySelector('[data-view=trail]').click()")
+  await until(async () => await evaluate("document.querySelectorAll('#trail .ev-row').length === 1"), 'decision trail not rendered')
+  await evaluate("document.querySelector('#trail .ev-row').click()")
+  assert.match(await evaluate("document.getElementById('trail').textContent"), /判官如何理解任务/)
+  assert.match(await evaluate("document.getElementById('trail').textContent"), /修复解析器并保留断言/)
+  assert.match(await evaluate("document.getElementById('trail').textContent"), /模型执行/)
+  assert.match(await evaluate("document.getElementById('trail').textContent"), /规则共 1 条 · 已回答 1 · 未完成或无效 0/)
+  assert.match(await evaluate("document.getElementById('trail').textContent"), /event:2/)
+  await evaluate("document.querySelector('#trail [data-evidence]').click()")
+  await until(async () => await evaluate("document.querySelector('#trail [data-evidence-body]')?.dataset.loaded === '1'"), 'full evidence was not loaded')
+  assert.match(await evaluate("document.querySelector('#trail [data-evidence-body]').textContent"), /保留所有断言/)
+  // The bulk button is visible without expanding the three idle skills below.
   await evaluate("document.querySelector('[data-view=skills]').click()")
-  const standby = await evaluate("(() => { const card = [...document.querySelectorAll('#skills .sk')].find((el) => el.textContent.includes('zz-standby')); return card && { state: card.dataset.state, text: card.textContent, button: card.querySelector('[data-recompile]').textContent } })()")
-  assert.equal(standby.state, 'standby')
-  assert.match(standby.text, /用到时再准备/)
-  assert.equal(standby.button, '现在准备')
-  assert.equal(await evaluate("document.querySelector('#compile-meter .m-work').style.width"), '0%', 'standby is not counted as in progress')
-  assert.match(await evaluate("document.getElementById('compile-title').textContent"), /60 个 skill 已就绪，其余 1 个用到时再准备/)
+  assert.equal(await evaluate("document.querySelectorAll('#skills .sk[data-state=ready]').length"), 60)
+  assert.equal(await evaluate("[...document.querySelectorAll('#skills .sk')].some((el) => el.textContent.includes('zz-standby'))"), false)
+  assert.match(await evaluate("document.getElementById('compile-title').textContent"), /^用到的 60 个 skill 都已就绪$/)
+  assert.match(await evaluate("document.getElementById('idle-title').textContent"), /^其余 3 个 skill 还没用到，用到时自动准备$/)
+  assert.equal(await evaluate("document.getElementById('prepare-all').hidden"), false)
+  assert.equal(await evaluate("document.getElementById('prepare-all').textContent"), '一键全部准备（3）')
+  assert.equal(await evaluate("document.querySelector('#compile-meter .m-work').style.width"), '0%')
+  assert.match(await evaluate("document.querySelector('#skills .sk').textContent"), /2 条规则/)
   await evaluate("document.querySelector('[data-view=topology]').click()")
-  assert.equal(await evaluate("document.querySelectorAll('#graph .node').length"), 197)
+  assert.equal(await evaluate("document.querySelectorAll('#graph .node').length"), 199)
   assert.equal(await evaluate("document.querySelectorAll('#graph .edge.contains').length"), 120)
   assert.ok(await evaluate("document.querySelectorAll('#graph line[marker-end]').length > 0"))
   await evaluate("document.getElementById('graph-skill').value='skill-0'; document.getElementById('graph-skill').dispatchEvent(new Event('change'))")
   assert.equal(await evaluate("document.querySelectorAll('#graph .node').length"), 19)
   await evaluate("document.querySelectorAll('#graph .node')[17].dispatchEvent(new MouseEvent('click', {bubbles:true}))")
-  assert.match(await evaluate("document.getElementById('detail-body').textContent"), /出处skill-0\/SKILL\.md 第 1–2 行附近/)
+  assert.match(await evaluate("document.getElementById('detail-body').textContent"), /出处skill-0\/SKILL\.md 第 [23] 行/)
   await evaluate("document.getElementById('detail').close()")
   // The settings tab renders the live model route and a save button; saving a
   // decision-model change goes through the real POST route.
@@ -114,20 +159,64 @@ try {
   assert.deepEqual([saved.decision?.provider, saved.decision?.model], ['mock-provider', 'mock-model'])
   // The saved file is a real config layer: re-resolving picks the new route up.
   assert.equal(normalizeConfig({}, root).decision.provider, 'deepseek-account', 'defaults still apply when the layer is cleared')
+  // Preparing the waiting skill from the panel shows its progress in plain words.
+  held = {}
+  held.promise = new Promise((resolve) => { held.release = resolve })
+  await evaluate("document.querySelector('[data-view=skills]').click()")
+  await evaluate("document.querySelector('#idle-list .idle-item button').click()")
+  await until(async () => await evaluate("document.querySelector('#skills .sk[data-state=compiling]')?.textContent.includes('zz-standby') === true"), 'the prepared skill did not show as in progress')
+  const working = await evaluate("document.querySelector('#skills .sk[data-state=compiling]').textContent")
+  assert.match(working, /准备中/)
+  assert.match(working, /0%/)
+  assert.match(await evaluate("document.getElementById('compile-title').textContent"), /^正在准备 1 个 skill，60 个已就绪$/)
+  for (const text of [working, await evaluate("document.getElementById('compile-sub').textContent")]) {
+    assert.doesNotMatch(text, /并行|并发|段|排队|探测/, 'no internal numbers on the panel')
+  }
+  held.release()
+  await until(async () => await evaluate("document.querySelectorAll('#skills .sk[data-state=ready]').length === 61"), 'the prepared skill did not finish')
+  // One click prepares both remaining skills through the real HTTP route.
+  held = {}
+  held.promise = new Promise((resolve) => { held.release = resolve })
+  assert.equal(await evaluate("document.getElementById('prepare-all').textContent"), '一键全部准备（2）')
+  await evaluate("document.getElementById('prepare-all').click()")
+  await until(async () => await evaluate("document.querySelectorAll('#skills .sk').length === 63 && document.getElementById('prepare-all').hidden"), 'bulk preparation did not include every remaining skill')
+  assert.equal(await evaluate("document.getElementById('idle-skills').hidden"), true)
+  assert.equal(await evaluate("document.querySelectorAll('#skills .sk[data-state=ready]').length"), 61, 'existing results remain ready')
+  assert.match(await evaluate("document.getElementById('compile-title').textContent"), /^正在准备 2 个 skill，61 个已就绪$/)
+  held.release()
+  await until(async () => await evaluate("document.querySelectorAll('#skills .sk[data-state=ready]').length === 63"), 'bulk preparation did not finish')
+  // Recreate all compiler state, as a process restart would, and reload the panel.
+  await settleCompiles(state, agent)
+  await stopCompiles(state)
+  const callsBeforeRestart = modelCalls
+  state.compileJobs = undefined
+  state.skillViews = new WeakMap()
+  state.graphs.clear()
+  const resumed = { session: { id: 's1', header: { cwd: root } }, options: {} }
+  state.agentBySession = new Map([['s1', resumed]])
+  state.liveAgents = new Set([resumed])
+  await refreshSkills({ get }, state, resumed, { wait: true })
+  await send('Page.navigate', { url: `http://127.0.0.1:${server.address().port}/eng-protocol?sessionId=s1&view=skills` })
+  await until(async () => await evaluate("document.querySelectorAll('#skills .sk[data-state=ready]').length === 63"), 'prepared skills disappeared after restart')
+  assert.equal(await evaluate("document.getElementById('prepare-all').hidden"), true)
+  assert.equal(await evaluate("document.getElementById('idle-skills').hidden"), true)
+  assert.equal(modelCalls, callsBeforeRestart, 'restart reuses cached compiles without any model call')
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false })
   await sleep(250)
   assert.equal(await evaluate('document.documentElement.scrollWidth <= window.innerWidth'), true, 'mobile page should not overflow')
   assert.deepEqual(errors, [])
   if (process.env.ENG_PROTOCOL_SCREENSHOT) {
-    await evaluate("document.getElementById('view-topology').scrollIntoView()")
+    await evaluate("document.getElementById('view-skills').scrollIntoView()")
     const screenshot = await send('Page.captureScreenshot', { format: 'png' })
     await writeFile(process.env.ENG_PROTOCOL_SCREENSHOT, Buffer.from(screenshot.data, 'base64'))
   }
-  console.log('ok - real Chromium: 60 skills, directed topology, filter, source details, settings save, mobile layout, no JS errors')
+  console.log('ok - real Chromium: 60 skills, directed topology, filter, source details, settings save, single and bulk preparation, restart recovery without model calls, mobile layout, no JS errors')
 } finally {
+  held?.release?.()
   if (socket?.readyState === WebSocket.OPEN) { await send('Browser.close').catch(() => {}); socket.close() }
   if (browser.exitCode === null) browser.kill()
   server.closeAllConnections()
   await new Promise((resolve) => server.close(resolve))
+  await stopCompiles(state)
   await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
 }

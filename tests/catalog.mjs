@@ -97,7 +97,9 @@ test('a settings save with an effort the model lacks is refused in plain words',
 test('after a reminder, the agent\'s next steps are read from the session events', () => {
   const after = new Aftermath()
   after.watch({ decisionId: 'd1', sessionId: 's', cwd: 'C:/p', boundary: 'tool', blocked: true, callId: 'push', deliveredCards: ['halt'], seq: 40 })
-  assert.deepEqual(after.push({ type: 'tool/call', seq: 41, data: { callId: 'push', name: 'bash', arguments: { command: 'git push' } } }), [])
+  const [progress] = after.push({ type: 'tool/call', seq: 41, data: { callId: 'push', name: 'bash', arguments: { command: 'git push' } } })
+  assert.equal(progress.ended, 'observing', 'a progress snapshot is immediately available')
+  assert.equal(progress.actions[0].status, 'blocked')
   after.push({ type: 'assistant/message', data: { message: { content: '我先确认一下是否可以推送。' } } })
   after.push({ type: 'tool/call', seq: 43, data: { callId: 'st', name: 'bash', arguments: { command: 'git status' } } })
   after.push({ type: 'tool/result', data: { message: { source: { callId: 'st' }, content: 'clean\n[exit code: 0]' } } })
@@ -109,7 +111,7 @@ test('after a reminder, the agent\'s next steps are read from the session events
   assert.equal(record.actions[1].target, 'git status')
 })
 
-test('the trail carries each decision\'s aftermath and the compile view gets parts and a log', async () => {
+test('the trail carries each decision\'s aftermath and the compile view gets progress and a log', async () => {
   const root = await mkdtemp(join(tmpdir(), 'eng-visual-'))
   try {
     const { appendDecision } = await import('../lib/store.js')
@@ -132,9 +134,9 @@ test('the trail carries each decision\'s aftermath and the compile view gets par
     void wantSkill(ctx, state, agent, 'alpha')
     await refreshSkills(ctx, state, agent, { wait: true })
     const status = compileStatusFor(state, agent, root)
-    assert.deepEqual(status.skills.alpha.segments.map((segment) => segment.state), ['done'])
-    assert.equal(status.skills.alpha.length, body.length)
-    assert.ok(status.log.some((item) => item.skill === 'alpha' && /准备好了，整理出 1 条规则/.test(item.text)))
-    assert.equal(compileSummary(status), '1 个 skill 全部就绪')
+    // A model answering with one JSON object and a quote instead of lines still compiles.
+    assert.deepEqual([status.skills.alpha.state, status.skills.alpha.progress, status.skills.alpha.rules], ['ready', 1, 1])
+    assert.ok(status.log.some((item) => item.skill === 'alpha' && /已就绪，整理出 1 条规则/.test(item.text)))
+    assert.equal(compileSummary(status), '用到的 1 个 skill 都已就绪')
   } finally { await rm(root, { recursive: true, force: true }) }
 })

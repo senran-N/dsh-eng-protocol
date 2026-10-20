@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { locateQuote, parseSkillSource } from '../lib/skill-source.js'
+import { locateQuote, parseSkillSource, quoteOf, renderStatements, statementsOf } from '../lib/skill-source.js'
 import { buildGraph, normalizeCompiled, skillPrefix } from '../lib/compiler.js'
 import { normalizeConfig } from '../lib/config.js'
 import { candidateCards } from '../lib/cards.js'
@@ -13,21 +13,42 @@ import { SessionLedger } from '../lib/events.js'
 import { callModel } from '../lib/model.js'
 
 const config = normalizeConfig({}, process.cwd())
-const skill = { name: 'demo', content: '# Scope\nUse this.\n## Verify\nRun the checks.', path: '/skills/demo/SKILL.md', hash: 'source' }
-const card = (id, triggers = ['edit']) => ({ id, title: id, when: 'editing code', triggers, rules: ['Check the actual behavior'], satisfiedWhen: 'applicable checks pass', sourceLines: [3, 4] })
+// Statements: [1] # Scope  [2] Use this.  [3] ## Verify  [4] Run the checks.
+const skill = { name: 'demo', content: '# Scope\nUse this.\n## Verify\nRun the checks.', path: '/skills/demo/SKILL.md' }
+const card = (id, triggers = ['edit'], s = [4, 4]) => ({ id, title: id, when: 'editing code', triggers, rules: ['Check the actual behavior'], satisfiedWhen: 'applicable checks pass', s })
 const raw = (cards = [card('verify')], relations = []) => ({ cards, relations })
 const needed = { state: 'needed', confidence: 0.9 }
 const tracker = () => ({ step: 5, cooldowns: new Map() })
+const BOM = String.fromCharCode(0xFEFF)
 
-test('Markdown indexing ignores fenced headings and chunks all characters without loss', () => {
-  const content = '\uFEFF# Scope\r\n```md\r\n# Not a section\r\n```\r\nDetails\r\n-------\r\n[guide](references/guide.md)\r\n' + 'x'.repeat(4500) + '\r\n## Final\r\nDo not skip this.'
-  const parsed = parseSkillSource({ content, name: 'long' }, 2000)
+test('Markdown indexing ignores fenced headings and covers every character with parts', () => {
+  const content = BOM + '# Scope\r\n```md\r\n# Not a section\r\n```\r\nDetails\r\n-------\r\n[guide](references/guide.md)\r\n' + 'x '.repeat(2400) + '\r\n## Final\r\nDo not skip this.'
+  const parsed = parseSkillSource({ content, name: 'long' }, { floor: 500, ceiling: 2000 })
   assert.deepEqual(parsed.headings.map((heading) => heading.title), ['Scope', 'Details', 'Final'])
   assert.equal(parsed.references[0].target, 'references/guide.md')
-  assert.equal(parsed.chunks.map((chunk) => chunk.content).join(''), parsed.content)
-  assert.ok(parsed.chunks.every((chunk) => chunk.content.length <= 2000))
-  assert.match(parsed.chunks.at(-1).content, /Do not skip this/)
+  assert.equal(parsed.parts.map((part) => part.content).join(''), parsed.content)
+  assert.ok(parsed.parts.every((part) => part.content.length <= 2000))
+  assert.match(parsed.parts.at(-1).content, /Do not skip this/)
+  assert.equal(parsed.breadcrumb(parsed.content.indexOf('Do not skip')), 'Scope › Final')
   assert.throws(() => parseSkillSource({ name: 'empty', content: '  ' }), /正文为空/)
+})
+
+test('statements number headings, items, rows, code and sentences, and quote back exactly', () => {
+  const content = ['# Rules', '- **Always** take a snapshot before running a migration.', '- Never edit an applied migration.', '  Add a new one instead.', '',
+    '在迁移之前必须备份。然后再执行！ See e.g. the guide. Use v1.2. Then deploy.', '| a | b |', '|---|---|', '| 1 | 2 |', '```sh', 'alembic upgrade head', '```'].join('\n')
+  const document = parseSkillSource({ name: 'x', content })
+  const statements = statementsOf(document, document.parts[0])
+  assert.deepEqual(statements.map((statement) => statement.kind), ['heading', 'item', 'item', 'text', 'text', 'text', 'text', 'text', 'row', 'row', 'code'])
+  const rendered = renderStatements(document, statements)
+  assert.match(rendered, /^\[1\] # Rules$/m)
+  assert.match(rendered, /^\[6\] See e\.g\. the guide\.$/m, 'an abbreviation does not end a sentence')
+  const quote = quoteOf(document, statements, 2, 2)
+  assert.equal(quote.quote, '**Always** take a snapshot before running a migration.', 'list markers are dropped, emphasis is kept')
+  assert.deepEqual([quote.startLine, quote.endLine], [2, 2])
+  assert.equal(quoteOf(document, statements, 3, 3).quote, 'Never edit an applied migration.\n  Add a new one instead.')
+  assert.equal(quoteOf(document, statements, 1, 2).quote, quote.quote, 'a heading that only introduces the cited text is left out')
+  assert.equal(quoteOf(document, statements, 4, 4).quote, '在迁移之前必须备份。')
+  assert.equal(quoteOf(document, statements, 99, 99), undefined)
 })
 
 test('stable identities distinguish punctuation, mixed scripts and case', () => {
@@ -36,22 +57,28 @@ test('stable identities distinguish punctuation, mixed scripts and case', () => 
   assert.equal(skillPrefix('web-ui'), 'skill_web_ui')
 })
 
-test('normalization preserves source and boundaries, rejects invalid obligations and hostile flags', () => {
+test('normalization grounds every card, fills what the model left out, and never copies hostile flags', () => {
   const graph = normalizeCompiled(raw([
-    { ...card('broken'), satisfiedWhen: '' },
-    { ...card('Good Card'), entry: true, critical: true, notApplicable: 'no executable change', quote: 'Run the checks.' },
-    card('later'),
+    { id: 'no-source', title: 'x', triggers: ['edit'] },
+    { ...card('Good Card'), entry: true, critical: true, notApplicable: 'no executable change' },
+    { id: 'later', s: '2', title: 'Use it' },
+    { id: 'wide', s: [1, 9] },
   ], [{ type: 'requires', source: 'Good Card', target: 'later' }]), skill)
-  assert.equal(graph.cards.length, 2)
+  assert.deepEqual(graph.cards.map((item) => item.id), ['skill_demo_good_card', 'skill_demo_later'])
   assert.equal(graph.cards[0].entry, false)
   assert.equal(graph.cards[0].critical, false)
   assert.equal(graph.cards[0].notApplicable, 'no executable change')
-  assert.deepEqual(graph.cards[0].sourceRef, { path: skill.path, startLine: 4, endLine: 4, precise: true, basis: 'verified-quote', quoteVerified: true })
-  // Without a quote, the model's line claim is only a fallback position, never proof.
-  assert.deepEqual(graph.cards[1].sourceRef, { path: skill.path, startLine: 3, endLine: 4, precise: false, basis: 'model-lines', quoteVerified: false })
-  assert.equal(graph.cards[1].grounded, false)
+  assert.deepEqual(graph.cards[0].sourceRef, { path: skill.path, startLine: 4, endLine: 4, precise: true, basis: 'statement', quoteVerified: true })
+  assert.equal(graph.cards[0].source, '/skills/demo/SKILL.md#body:L4-L4')
+  // An obligation without moments or completion evidence is kept, with defaults.
+  const later = graph.cards[1]
+  assert.equal(later.quote, 'Use this.')
+  assert.deepEqual(later.triggers, ['turn', 'settle'])
+  assert.equal(later.satisfiedWhen, undefined)
+  assert.equal(later.when, 'Scope', 'the section is the default context')
   assert.equal(graph.relations[0].source, graph.cards[0].id, 'raw local ids resolve after normalization')
-  assert.ok(graph.warnings.some((warning) => warning.includes('完成证据')))
+  assert.deepEqual(graph.diagnostics.filter((item) => ['no-source', 'too-broad'].includes(item.code)).map((item) => item.id), ['no-source', 'wide'])
+  assert.equal(graph.coverage.dropped, 2)
   assert.throws(() => normalizeCompiled({ cards: 'nope' }, skill), /cards/)
 })
 
@@ -65,14 +92,19 @@ test('a quote is found despite whitespace, case, Markdown marks and typographic 
   assert.equal(locateQuote(body, 'run'), undefined, 'a fragment too short to identify a sentence is not a quote')
 })
 
-test('part plans are fixed by the text: an edit late in a skill leaves earlier parts intact', () => {
-  const sections = (last) => ['# One', 'a'.repeat(1800), '## Two', 'b'.repeat(1800), '## Three', 'c'.repeat(1800), `## Four\n${last}`].join('\n')
-  const plan = (text) => parseSkillSource({ name: 'long', content: text }, 2000).chunks.map((chunk) => chunk.content)
-  const first = plan(sections('END'))
-  assert.deepEqual(plan(sections('END')), first, 'the same text always yields the same parts')
-  const edited = plan(sections('CHANGED AT THE END'))
-  assert.deepEqual(edited.slice(0, -1), first.slice(0, -1))
-  assert.notDeepEqual(edited.at(-1), first.at(-1))
+test('parts follow the sections: an edit anywhere leaves every other part intact', () => {
+  const sections = (first, last) => ['# Title', `## One\n${first}`, `## Two\n${'b'.repeat(2500)}`, `## Three\n${'c'.repeat(2500)}`, `## Four\n${last}`].join('\n')
+  const plan = (text) => parseSkillSource({ name: 'long', content: text }).parts.map((part) => part.content)
+  const original = plan(sections('a'.repeat(2500), 'd'.repeat(2500)))
+  assert.equal(original.length, 4, 'the title joins the first section; each section is one part')
+  assert.deepEqual(plan(sections('a'.repeat(2500), 'd'.repeat(2500))), original, 'the same text always yields the same parts')
+  const lateEdit = plan(sections('a'.repeat(2500), `${'d'.repeat(2500)} CHANGED`))
+  assert.deepEqual(lateEdit.slice(0, -1), original.slice(0, -1))
+  const earlyEdit = plan(sections(`CHANGED ${'a'.repeat(3000)}`, 'd'.repeat(2500)))
+  assert.deepEqual(earlyEdit.slice(1), original.slice(1), 'an edit at the start does not shift later parts')
+  // A section too long for one part is cut at its own sub-headings first.
+  const long = parseSkillSource({ name: 'long', content: ['# T', '## Big', '### A', 'a'.repeat(6000), '### B', 'b'.repeat(6000), '## Small', 's'.repeat(2500)].join('\n') })
+  assert.deepEqual(long.parts.map((part) => part.section), ['T', 'T › Big › B', 'T › Small'])
 })
 
 test('file and command predicates follow globs and whole words', () => {
@@ -90,7 +122,7 @@ test('file and command predicates follow globs and whole words', () => {
 })
 
 test('topology rejects cycles, external prerequisites and duplicate edges; membership is explicit', () => {
-  const graph = normalizeCompiled(raw([card('a'), card('b')], [
+  const graph = normalizeCompiled(raw([card('a', ['edit'], [2, 2]), card('b')], [
     { type: 'requires', source: 'a', target: 'b' },
     { type: 'requires', source: 'a', target: 'b' },
     { type: 'blocks', source: 'b', target: 'a' },
@@ -109,12 +141,12 @@ test('topology rejects cycles, external prerequisites and duplicate edges; membe
 })
 
 test('candidate closure judges prerequisites even when only the dependent event fires', () => {
-  const graph = normalizeCompiled(raw([card('read', ['read']), card('ship', ['settle'])], [
+  const graph = normalizeCompiled(raw([card('read', ['read'], [2, 2]), card('ship', ['settle'])], [
     { type: 'requires', source: 'read', target: 'ship' },
   ]), skill, config)
   const merged = buildGraph('/project', new Map([['demo', graph]]))
   const candidates = candidateCards(merged.cards, { triggers: ['settle'], active: new Set(['demo']), relations: merged.relations }).filter((item) => item.skill)
-  assert.deepEqual(candidates.map((item) => item.id), ['skill_demo_read', 'skill_demo_ship'])
+  assert.deepEqual(candidates.map((item) => item.id), ['skill_demo_entry', 'skill_demo_read', 'skill_demo_ship'])
   const states = { skill_demo_read: { state: 'satisfied', confidence: 0.9 }, skill_demo_ship: needed }
   assert.deepEqual(selectAssessments(states, candidates, merged.relations, config, tracker()).selected.map((item) => item.id), ['skill_demo_ship'])
   states.skill_demo_read.confidence = 0.1

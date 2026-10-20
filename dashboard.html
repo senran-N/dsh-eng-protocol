@@ -49,7 +49,7 @@
       <div class="kpi k-rules"><div class="l"><i></i>生效的规则</div><div class="n" id="k-total">0</div><div class="h" id="k-total-h"></div></div>
       <div class="kpi k-remind"><div class="l"><i></i>提醒</div><div class="n" id="k-inject">0</div><div class="h">AI 准备做事时收到的提醒</div></div>
       <div class="kpi k-block"><div class="l"><i></i>拦下</div><div class="n" id="k-block">0</div><div class="h">危险或越界的操作先停一下</div></div>
-      <div class="kpi k-follow"><div class="l"><i></i>提醒后照做</div><div class="n" id="k-follow">—</div><div class="h" id="k-follow-h"></div></div>
+      <div class="kpi k-follow" title="后续判官确认满足的次数 / 确认满足或仍需提醒的次数。这是判定结果，不代表任务成功率或提醒的因果效果。"><div class="l"><i></i>后续判定满足</div><div class="n" id="k-follow">—</div><div class="h" id="k-follow-h"></div></div>
       <div class="kpi"><div class="l"><i></i>平均每次检查</div><div class="n" id="k-lat">—</div><div class="h" id="k-lat-h"></div></div>
     </div>
     <div class="kpinote" id="kpinote"></div>
@@ -133,7 +133,7 @@
             <th>来自</th>
             <th>什么时候检查</th>
             <th class="num" aria-sort="none"><button class="sort" data-sort="injected">提醒</button></th>
-            <th class="num" aria-sort="none"><button class="sort" data-sort="follow" title="提醒之后 AI 照做的次数 / 能看出结果的次数">照做</button></th>
+            <th class="num" aria-sort="none"><button class="sort" data-sort="follow" title="后续确认满足 / 确认满足或仍需提醒；处理中、不适用和未知不计入分母">满足</button></th>
             <th aria-sort="none"><button class="sort" data-sort="last">最近</button></th>
           </tr></thead>
           <tbody id="cards"></tbody>
@@ -152,27 +152,23 @@
           <div class="muted" id="compile-sub"></div>
         </div>
         <div class="acts">
-          <button class="btn" id="compile-retry" hidden>重试</button>
-          <button class="btn" id="compile-cancel" hidden>暂停</button>
-          <button class="btn" id="rebuild" title="把所有 skill 重新编译成规则（点两次确认）">全部重新编译</button>
+          <button class="btn primary" id="prepare-all" hidden title="一次准备当前会话里所有尚未准备的 skill，已有结果会保留">一键全部准备</button>
+          <button class="btn primary" id="compile-retry" hidden>重试</button>
+          <button class="btn" id="rebuild" hidden title="把用到的 skill 重新编译成规则，期间旧规则照常工作（点两次确认）">全部重新编译</button>
         </div>
-        <div class="meter" id="compile-meter"></div>
-        <div class="legend-row">
-          <span><i style="background:var(--good)"></i>已完成</span>
-          <span><i style="background:color-mix(in srgb, var(--good) 55%, var(--surface-3))"></i>上次做完、这次沿用</span>
-          <span><i style="background:var(--accent)"></i>正在编译</span>
-          <span><i style="background:var(--warn)"></i>稍后再试</span>
-          <span><i style="background:var(--bad)"></i>失败</span>
-          <span><i style="background:var(--surface-3)"></i>等待</span>
-        </div>
+        <div class="meter" id="compile-meter" hidden></div>
       </div>
       <div class="skill-grid" id="skills"></div>
-      <div class="empty" id="skills-empty" hidden>这个项目还没有 skill。</div>
+      <div class="empty" id="skills-empty" hidden>这个会话还没用到 skill。AI 加载某个 skill 时，会自动把它整理成规则。</div>
+      <details class="idle-skills" id="idle-skills" hidden>
+        <summary id="idle-title"></summary>
+        <div class="idle-list" id="idle-list"></div>
+      </details>
     </div>
     <div class="card">
-      <div class="card-head"><h2>过程</h2><span class="aside">最近的编译经过</span></div>
+      <div class="card-head"><h2>过程</h2><span class="aside">最近发生的事</span></div>
       <ul class="log" id="compile-log"></ul>
-      <div class="empty" id="compile-log-empty" hidden>还没有编译过程可看。</div>
+      <div class="empty" id="compile-log-empty" hidden>还没有需要记录的事。</div>
     </div>
   </section>
 
@@ -224,7 +220,7 @@
   var OUTCOME = { injected: ['提醒了', 'sel'], blocked: ['拦下了', 'warn'], shadow: ['影子模式·本会提醒', 'plain'], failed: ['出错', 'bad'], quiet: ['没提醒', 'plain'] };
   var STATE = { needed: ['需要提醒', 'warn'], addressing: ['正在做', 'sel'], satisfied: ['已做到', 'ok'], inapplicable: ['不相关', 'plain'], unknown: ['看不出来', 'plain'] };
   var STATE_ORDER = { needed: 0, addressing: 1, unknown: 2, satisfied: 3, inapplicable: 4 };
-  var RESULT = { selected: '提醒了', cooldown: '刚提醒过，先不重复', limit: '—', prerequisite: '要先完成前一步', confidence: '把握不够，没提醒', covered: '已有相同的提醒', scope: '这个 skill 与当前任务无关', state: '—' };
+  var RESULT = { selected: '提醒了', verification: '完成情况待核对，已提醒', cooldown: '刚提醒过，先不重复', limit: '—', prerequisite: '要先完成前一步', confidence: '把握不够，没提醒', covered: '已有相同的提醒', scope: '这个 skill 与当前任务无关', state: '—' };
   var TRIGGER = {
     turn: '新的请求', read: '读文件', edit: '改代码', first_edit: '第一次改代码', test_edit: '改测试',
     check_start: '开始跑检查', checked: '检查跑完', failed: '出错', stuck: '反复出错', dependency: '涉及依赖',
@@ -232,7 +228,7 @@
     research: '查资料', delegate: '交给子任务',
   };
   var ACTION = { edit: '改', read: '读', command: '运行', skill: '用 skill', research: '查', delegate: '交给子任务', other: '调用' };
-  var SKILL_STATE = { cached: ['已就绪', 'ok'], done: ['已就绪', 'ok'], standby: ['用到时再准备', 'plain'], queued: ['等待中', 'plain'], compiling: ['编译中', 'sel'], retrying: ['稍后再试', 'warn'], failed: ['没准备好', 'bad'], cancelled: ['已暂停', 'warn'] };
+  var SKILL_STATE = { ready: ['已就绪', 'ok'], standby: ['用到时准备', 'plain'], queued: ['排队中', 'plain'], compiling: ['准备中', 'sel'], retrying: ['部分就绪', 'warn'], failed: ['没准备好', 'bad'] };
   var TIME_SERIES = [
     { key: 'delivered', label: '提醒或拦下', color: 'var(--viz-1)' },
     { key: 'shadow', label: '影子模式下本会提醒', color: 'var(--viz-2)' },
@@ -341,6 +337,19 @@
   document.addEventListener('click', function(event){
     var link = event.target.closest('[data-trajectory]');
     if(link){ event.stopPropagation(); window.parent.postMessage({ type: 'eng-protocol/open-trajectory', callId: link.dataset.trajectory }, location.origin); return; }
+    var evidence = event.target.closest('[data-evidence]');
+    if(evidence){
+      event.stopPropagation();
+      var output = evidence.parentElement.querySelector('[data-evidence-body]');
+      if(output.dataset.loaded){ output.hidden = !output.hidden; return; }
+      evidence.disabled = true;
+      var query = identityQuery(); query.set('key', evidence.dataset.evidence);
+      getJson(api('/api/evidence') + '?' + query).then(function(data){
+        output.textContent = JSON.stringify(data.evidence, null, 2); output.dataset.loaded = '1'; output.hidden = false;
+      }).catch(function(error){ output.textContent = '读不到快照：' + message(error); output.hidden = false; })
+        .finally(function(){ evidence.disabled = false; });
+      return;
+    }
     var go = event.target.closest('[data-goto]');
     if(go) switchView(go.dataset.goto);
   }, true);
@@ -399,7 +408,7 @@
     try{
       var data = await getJson(trailUrl(limit, offset));
       var items = options.append ? trail.items.concat(data.items) : data.items;
-      var sig = [data.total, items.length, items[0] ? keyOf(items[0]) : '', items.filter(function(i){ return i.after; }).length].join('|');
+      var sig = JSON.stringify([data.total, items]);
       trail.total = data.total;
       if(!options.quiet || sig !== trail.signature){ trail.items = items; trail.signature = sig; renderTrail(); }
     }catch(error){ toast('读不到记录：' + message(error), 'bad'); }
@@ -410,7 +419,7 @@
       var q = identityQuery(); q.set('limit', '120');
       var data = await getJson(api('/api/decisions') + '?' + q);
       var items = data.items.filter(function(r){ var o = outcomeOf(r); return o === 'injected' || o === 'blocked' || o === 'shadow' || o === 'failed'; }).slice(0, 6);
-      var sig = items.map(keyOf).join(',') + items.filter(function(i){ return i.after; }).length;
+      var sig = JSON.stringify(items);
       if(sig === state.recent.signature) return;
       state.recent.signature = sig;
       var list = $('recent'); list.replaceChildren();
@@ -436,7 +445,7 @@
     renderProjects(); renderHero(); renderKpis(); renderActivity(); renderSessions();
     renderCards(); renderSkills(); renderOverviewCompile();
     $('n-cards').textContent = num(d.graph.cards.length);
-    $('n-skills').textContent = d.skills.length ? num(d.skills.length) : '';
+    $('n-skills').textContent = d.compile && d.compile.inUse ? num(d.compile.inUse) : '';
     $('n-trail').textContent = d.totals.decisions ? num(d.totals.decisions) : '';
     $('skills-alert').hidden = problemSkills(d.compile).length === 0;
     state.graphDirty = true;
@@ -464,6 +473,10 @@
       tone = 'info'; title = '正在准备 skill';
       text = c.summary + '。准备期间，已有的规则照常工作。';
       actions = '<button class="btn" data-goto="skills">看进度</button>';
+    } else if(c.retrying){
+      tone = 'info'; title = 'skill 部分就绪';
+      text = c.summary + '。已经准备好的规则在工作。';
+      actions = '<button class="btn" data-goto="skills">查看详情</button>';
     } else if(d.config.shadow){
       tone = 'warn'; title = '影子模式：只观察，不打扰'; text = '照常检查和记录，但不提醒、不拦下，用来和正常模式对比效果。' + activity;
     } else {
@@ -484,7 +497,9 @@
     $('k-inject').textContent = num(d.totals.injected);
     $('k-block').textContent = num(d.totals.blocked);
     $('k-follow').textContent = rate(follow.live);
-    $('k-follow-h').textContent = followTotal(follow.shadow) ? '不提醒时自己做到 ' + rate(follow.shadow) : followTotal(follow.live) ? '共 ' + ratio(follow.live) + ' 次' : '提醒之后才能看出来';
+    $('k-follow-h').textContent = (followTotal(follow.live) ? '共 ' + ratio(follow.live) + ' 次' : '等待后续有效判断')
+      + ' · 处理中 ' + ((follow.live || {}).addressing || 0) + ' · 不适用 ' + ((follow.live || {}).inapplicable || 0)
+      + (followTotal(follow.shadow) ? ' · 影子模式满足 ' + rate(follow.shadow) : '');
     $('k-lat').textContent = d.totals.decisions ? seconds(d.totals.avgLatencyMs) : '—';
     $('k-lat-h').textContent = d.totals.failed ? '其中 ' + num(d.totals.failed) + ' 次出错' : (d.totals.decisions ? '没有出错' : '');
     $('k-lat-h').className = 'h' + (d.totals.failed ? ' bad' : '');
@@ -628,7 +643,8 @@
     if(o === 'injected') return '提醒了' + titles.join('');
     if(o === 'shadow') return (r.wouldBlock ? '本会拦下' : '本会提醒') + titles.join('');
     if(o === 'failed') return String(r.error || '检查出错').split('：')[0];
-    return '一切正常';
+    if(Object.values(r.assessments || {}).some(function(a){ return a.state === 'unknown'; })) return '有规则尚未判明';
+    return '本次未选出提醒';
   }
   function why(r){
     var a = r.assessments || {}, first = (r.selected || [])[0];
@@ -651,12 +667,16 @@
     }
     return html;
   }
-  function assessmentTable(rows){
+  function assessmentTable(rows, evidence){
     return '<div class="scroll"><table class="assess"><thead><tr><th>规则</th><th>判断</th><th class="num">把握</th><th>结果</th><th>原因</th></tr></thead><tbody>'
       + rows.map(function(row){
           var label = STATE[row.a.state] || [row.a.state || '—', 'plain'], result = RESULT[row.r.kind] || '—';
           if(row.r.kind === 'prerequisite' && row.r.by) result = '要先完成「' + cardTitle(row.r.by) + '」';
-          return '<tr' + (row.picked ? ' class="picked"' : '') + '><td title="' + esc(row.id) + '">' + esc(cardTitle(row.id)) + '</td><td>' + pill(label[0], label[1]) + '</td><td class="num">' + esc(percent(row.a.confidence)) + '</td><td>' + esc(result) + '</td><td class="reason">' + esc(row.a.reason || '—') + '</td></tr>';
+          var citations = (row.a.evidence || []).map(function(c){
+            var source = (evidence || []).find(function(item){ return item.ref === c.ref; });
+            return '<div class="muted">[' + esc(c.ref) + '] ' + esc(c.quote || '') + (source && source.callId ? ' ' + trajectoryLink(source.callId, '轨迹') : '') + '</div>';
+          }).join('');
+          return '<tr' + (row.picked ? ' class="picked"' : '') + '><td title="' + esc(row.id) + '">' + esc(cardTitle(row.id)) + '</td><td>' + pill(label[0], label[1]) + '</td><td class="num">' + esc(percent(row.a.confidence)) + '</td><td>' + esc(result) + '</td><td class="reason">' + esc(row.a.reason || '—') + citations + '</td></tr>';
         }).join('') + '</tbody></table></div>';
   }
   function decisionDetail(r){
@@ -668,6 +688,22 @@
     var flags = (r.preset && r.preset.length ? pill('危险操作，默认先拦下', 'warn') : '') + (r.cleared && r.cleared.length ? pill('用户已明确同意，放行', 'ok') : '');
     var html = '<div class="muted" style="font-size:12px">' + meta.join(' · ') + (flags ? ' ' + flags : '') + (r.callId ? ' · ' + trajectoryLink(r.callId) : '') + '</div>';
     if(r.error) html += '<div class="err" style="margin-top:6px">' + esc(r.error) + '</div>';
+    if(r.judgeCoverage) html += '<div class="muted">规则共 ' + num(r.judgeCoverage.total) + ' 条 · 已回答 ' + num(r.judgeCoverage.answered) + ' · 未完成或无效 ' + num(r.judgeCoverage.unresolved) + ' · 已判定范围外、未展开 ' + num(r.judgeCoverage.scopeSkipped) + '</div>';
+    if(r.evidenceError) html += '<div class="err">证据快照未保存：' + esc(r.evidenceError) + '</div>';
+    if(r.cacheHit) html += '<div class="muted">复用相同证据与动作的缓存判断；以下执行记录来自原判断，本次未重新调用模型。</div>';
+    if(r.attempts && r.attempts.length){
+      var phaseNames = { initial: '首次判断', expanded: '展开义务', review: '复核', repair: '补查无效判断' }, stages = { queue: '排队', model: '模型执行', budget: '总时限已用尽' };
+      html += '<h4>等待与执行</h4><div class="muted">总时限 ' + esc(seconds(r.deadlineMs)) + '，输入 ' + num(r.inputChars) + ' 字符</div>';
+      html += r.attempts.map(function(a){ return '<div class="muted">' + esc(phaseNames[a.phase] || a.phase) + ' · ' + (a.cards || []).length + ' 条 · 排队 ' + esc(seconds(a.queueMs)) + ' · 执行 ' + esc(seconds(a.runMs)) + ' · ' + esc(stages[a.timeoutStage] || ({ answered: '已回答', invalid: '格式有误', failed: '失败', cancelled: '已取消', 'not-started': '未开始' }[a.status]) || a.status) + '</div>'; }).join('');
+      var understandings = r.attempts.filter(function(a){ return a.understanding; });
+      html += '<h4>判官如何理解任务</h4>' + (understandings.length ? understandings.map(function(a){
+        var u = a.understanding;
+        return '<div class="reply"><b>' + esc(u.goal) + '</b><div>阶段：' + esc(u.phase || '未说明') + '</div><div>约束：' + esc((u.constraints || []).join('；') || '未列出') + '</div><div>待完成：' + esc((u.remaining || []).join('；') || '未列出') + '</div><div class="muted">' + esc(phaseNames[a.phase] || a.phase) + ' · 依据 ' + esc((u.sourceRefs || []).join(', ') || '未引用') + ((u.invalidRefs || []).length ? ' · 含无效引用' : '') + ' · 模型解释，需结合原始证据核对</div></div>';
+      }).join('') : '<div class="muted">本次未返回结构化任务理解，不能据此声称判官理解正确。</div>');
+    }
+    if(r.evidenceKey) html += '<div style="margin-top:8px"><button class="linkbtn" data-evidence="' + esc(r.evidenceKey) + '">查看判官当时收到的完整证据</button><pre data-evidence-body hidden style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:420px;overflow:auto"></pre></div>';
+    if(r.evidenceCoverage) html += '<div class="muted">历史窗口外：' + num(r.evidenceCoverage.omittedTools || 0) + ' 次工具、' + num(r.evidenceCoverage.omittedChecks || 0) + ' 条检查、' + num(r.evidenceCoverage.omittedTimeline || 0) + ' 条事件；未包含的记录不能证明未完成。</div>';
+    if(r.citationCoverage && r.citationCoverage.uncited) html += '<div class="muted">' + num(r.citationCoverage.uncited) + ' 条判断没有提供证据引用，当前仅有模型结论可供核对。</div>';
     html += stepsHtml(r.after);
     var selected = r.selected || [], as = r.assessments || {}, reasons = r.reasons || {};
     var rows = (r.candidates || []).map(function(id){ return { id: id, a: as[id] || {}, r: reasons[id] || {}, picked: selected.indexOf(id) >= 0 }; });
@@ -676,8 +712,8 @@
     if(!rows.length) return html;
     var relevant = rows.filter(function(row){ return row.picked || ['needed', 'addressing', 'unknown'].indexOf(row.a.state) >= 0; });
     var rest = rows.filter(function(row){ return relevant.indexOf(row) < 0; });
-    html += '<h4>这次看了哪些规则</h4>' + (relevant.length ? assessmentTable(relevant) : '<div class="muted">所有规则都已做到或与当前任务无关。</div>');
-    if(rest.length) html += '<details style="margin-top:6px"><summary>另外 ' + num(rest.length) + ' 条已做到或不相关</summary>' + assessmentTable(rest) + '</details>';
+    html += '<h4>这次看了哪些规则</h4>' + (relevant.length ? assessmentTable(relevant, r.evidence) : '<div class="muted">本次没有需要展开的判断，请核对具体状态。</div>');
+    if(rest.length) html += '<details style="margin-top:6px"><summary>另外 ' + num(rest.length) + ' 条判断</summary>' + assessmentTable(rest, r.evidence) + '</details>';
     return html;
   }
   function decisionItem(r, owner){
@@ -755,93 +791,103 @@
   }
 
   // ---- skills & compile ------------------------------------------------------------------
-  async function compileAction(action, name, button, fresh){
+  async function compileAction(action, name, button){
     if(button) button.disabled = true;
     try{
       await postJson('/api/compile', { action: action, name: name });
-      toast(action === 'cancel' ? '已暂停。做完的部分都保存了。' : action === 'retry' ? '正在重试，上次做完的部分不会重做。' : fresh ? '正在准备 ' + name + '。' : (name ? '正在重新编译 ' + name : '正在重新编译全部 skill') + '，期间旧规则照常工作。');
+      toast(action === 'retry' ? '正在重试，已经准备好的部分不会重做。'
+        : action === 'prepare' ? '正在准备 ' + name + '。'
+          : action === 'prepare-all' ? '已开始准备全部剩余 skill，可在这里查看进度。'
+          : (name ? '正在重新编译 ' + name : '正在重新编译用到的 skill') + '，期间旧规则照常工作。');
       setTimeout(loadStats, 500);
     }catch(error){ toast('没能开始：' + message(error), 'bad'); }
     finally{ if(button) button.disabled = false; }
   }
-  // Every skill's body as a bar of parts; cached skills are one solid "ready" bar.
-  function docBar(entry){
-    var segs = entry && entry.segments, length = entry && entry.length;
-    if(!segs || !segs.length || !length){
-      var s = !entry || entry.state === 'cached' || entry.state === 'done' ? 'done' : entry.state === 'failed' ? 'failed' : entry.state === 'compiling' ? 'compiling' : entry.state === 'retrying' ? 'retrying' : 'pending';
-      return '<div class="docbar"><i data-s="' + s + '"></i></div>';
-    }
-    return '<div class="docbar" aria-hidden="true">' + segs.map(function(g){ return '<i data-s="' + esc(g.state) + '" style="flex-grow:' + Math.max(1, Math.round((g.to - g.from) / length * 1000)) + '" title="' + esc({ done: '已完成', resumed: '上次做完、这次沿用', compiling: '正在编译', retrying: '稍后再试', failed: '失败', pending: '等待' }[g.state] || g.state) + '"></i>'; }).join('') + '</div>';
+  function skillLabel(e){
+    if(e.stale && e.state !== 'failed') return ['正在更新，暂用上一版', 'warn'];
+    return SKILL_STATE[e.state] || [e.state, 'plain'];
+  }
+  // How far a skill in progress is; a ready skill needs no bar.
+  function progressBar(e){
+    if(e.state === 'ready' || e.state === 'standby') return '';
+    var tone = e.state === 'failed' ? 'bad' : e.state === 'retrying' ? 'warn' : 'work';
+    var value = Math.round((e.progress || 0) * 100);
+    return '<div class="bar" data-tone="' + tone + '" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + value + '"><i style="width:' + Math.max(2, value) + '%"></i></div>';
   }
   function skillHint(e){
-    if(!e) return '';
-    if(e.state === 'failed') return '<div class="sk-hint bad">' + esc(e.hint || '编译失败') + (e.nextRetryAt ? ' ' + esc(until(e.nextRetryAt)) + '会自动再试。' : '') + (e.stale ? ' 在此之前仍用旧版规则。' : '') + '</div>'
-      + (e.error ? '<details><summary>详细错误</summary><div class="err">' + esc(e.error) + '</div></details>' : '');
-    if(e.state === 'retrying') return '<div class="sk-hint">' + esc(e.hint || '暂时失败') + (e.retryInMs ? '（' + esc(duration(e.retryInMs)) + '后再试）' : '') + '</div>';
-    if(e.state === 'compiling') return '<div class="sk-hint">' + (e.parts > 1 ? '分 ' + e.parts + ' 段处理，已完成 ' + (e.partsDone || 0) + ' 段' : '正在编译') + (e.resumedParts ? '，其中 ' + e.resumedParts + ' 段沿用上次' : '') + '</div>';
-    if(e.state === 'queued') return '<div class="sk-hint">' + (e.resumable ? '上次做了一部分，会接着做' : '排队中') + '</div>';
-    if(e.state === 'cancelled') return '<div class="sk-hint">已暂停，点“继续”从中断处接着做</div>';
-    if(e.state === 'standby') return '<div class="sk-hint">会话加载这个 skill 时再整理它的规则；想提前看规则可以点“现在准备”。</div>';
-    return '';
+    var text = e.detail || '';
+    if(e.state === 'retrying' && e.nextRetryAt) text += ' ' + until(e.nextRetryAt) + '再试。';
+    if(!text || (e.state === 'ready' && !e.kept)) return '';
+    return '<div class="sk-hint' + (e.state === 'failed' ? ' bad' : '') + '">' + esc(text) + '</div>'
+      + (e.error && (e.state === 'failed' || e.kept) ? '<details><summary>详细错误</summary><div class="err">' + esc(e.error) + '</div></details>' : '');
   }
+  function logLine(item){ return '<li data-l="' + esc(item.level || 'info') + '"><time>' + esc(clock(Date.parse(item.at))) + '</time><i></i><span>' + (item.skill ? '<b>' + esc(item.skill) + '</b>' : '') + esc(item.text) + '</span></li>'; }
   function renderSkills(){
     var d = state.data, c = d.compile || {}, entries = c.skills || {}, grid = $('skills');
     var byName = new Map(d.skills.map(function(s){ return [s.name, s]; }));
-    var names = Array.from(new Set(Object.keys(entries).concat(d.skills.map(function(s){ return s.name; }))));
-    var order = { failed: 0, retrying: 1, compiling: 2, queued: 3, cancelled: 4, done: 5, cached: 6, standby: 7 };
-    names.sort(function(a, b){ var x = (entries[a] || {}).state || 'cached', y = (entries[b] || {}).state || 'cached'; return ((order[x] === undefined ? 8 : order[x]) - (order[y] === undefined ? 8 : order[y])) || a.localeCompare(b); });
-    var ready = names.filter(function(n){ var s = (entries[n] || { state: 'cached' }).state; return s === 'cached' || s === 'done'; }).length;
-    var failed = names.filter(function(n){ return (entries[n] || {}).state === 'failed'; }).length;
-    var standby = names.filter(function(n){ return (entries[n] || {}).state === 'standby'; }).length;
-    var working = names.length - ready - failed - standby;
-    $('compile-title').textContent = c.summary || (names.length ? names.length + ' 个 skill 全部就绪' : '这个项目没有 skill');
-    var sub = [];
-    if(c.finishedAt && !c.running) sub.push('上次编译于 ' + ago(c.finishedAt));
-    if(c.running && c.startedAt) sub.push('开始于 ' + ago(c.startedAt));
-    $('compile-sub').textContent = sub.join(' · ');
-    var total = Math.max(1, names.length);
+    var names = Object.keys(entries);
+    var used = names.filter(function(n){ return entries[n].inUse; });
+    var idle = names.filter(function(n){ return !entries[n].inUse; }).sort();
+    var order = { failed: 0, retrying: 1, compiling: 2, queued: 3, ready: 4 };
+    var rank = function(n){ var o = order[entries[n].state]; return o === undefined ? 5 : o; };
+    used.sort(function(a, b){ return (rank(a) - rank(b)) || a.localeCompare(b); });
+    var count = function(states){ return used.filter(function(n){ return states.indexOf(entries[n].state) >= 0; }).length; };
+    var ready = count(['ready']), failed = count(['failed']), working = used.length - ready - failed;
+    $('compile-title').textContent = c.summary || '—';
+    $('compile-sub').textContent = c.running && c.startedAt ? '开始于 ' + ago(c.startedAt) : c.finishedAt ? '上次准备完成于 ' + ago(c.finishedAt) : '';
+    var total = Math.max(1, used.length);
+    $('compile-meter').hidden = used.length === 0;
     $('compile-meter').innerHTML = '<i class="m-ready" style="width:' + (ready / total * 100) + '%"></i><i class="m-work" style="width:' + (working / total * 100) + '%"></i><i class="m-bad" style="width:' + (failed / total * 100) + '%"></i>';
-    $('compile-retry').hidden = !(failed > 0 || c.cancelled);
-    $('compile-retry').textContent = c.cancelled ? '继续' : '重试没准备好的';
-    $('compile-cancel').hidden = !c.running;
+    $('compile-retry').hidden = !(failed > 0 || c.retrying > 0);
+    $('prepare-all').hidden = idle.length === 0;
+    $('prepare-all').textContent = '一键全部准备（' + num(idle.length) + '）';
+    $('rebuild').hidden = used.length === 0;
     grid.replaceChildren();
-    names.forEach(function(name){
-      var e = entries[name] || { state: 'cached' }, skill = byName.get(name) || {}, label = SKILL_STATE[e.state] || [e.state, 'plain'];
-      if(skill.stale && e.state !== 'failed') label = ['更新中，暂用旧版', 'warn'];
+    used.forEach(function(name){
+      var e = entries[name], skill = byName.get(name) || {}, label = skillLabel(e);
       var el = node('div', 'sk'); el.dataset.state = e.state;
       var meta = [];
-      if(skill.cards) meta.push(num(skill.cards) + ' 条规则');
-      if(e.state === 'done' && e.durationMs) meta.push('用时 ' + duration(e.durationMs));
-      else if(skill.compiledAt) meta.push('更新于 ' + ago(skill.compiledAt));
+      if(e.state === 'ready' && e.rules) meta.push(num(e.rules) + ' 条规则');
+      if(e.state === 'ready' && e.durationMs) meta.push('用时 ' + duration(e.durationMs));
+      else if(e.state === 'ready' && skill.compiledAt) meta.push('更新于 ' + ago(skill.compiledAt));
       if(skill.invocation && skill.invocation.modelInvocable === false) meta.push('需明确调用');
       el.innerHTML = '<div class="sk-top"><b title="' + esc(name) + '">' + esc(name) + '</b>' + pill(label[0], label[1]) + '</div>'
         + (skill.description ? '<div class="sk-desc">' + esc(skill.description) + '</div>' : '')
-        + docBar(e) + skillHint(e)
-        + (skill.warnings && skill.warnings.length ? '<details><summary>' + num(skill.warnings.length) + ' 条编译提示</summary><ul style="margin:6px 0 0;padding-left:18px;font-size:12px;color:var(--muted)">' + skill.warnings.map(function(w){ return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></details>' : '')
+        + progressBar(e) + skillHint(e)
         + '<div class="sk-meta">' + meta.map(function(m){ return '<span>' + esc(m) + '</span>'; }).join('')
-        + '<span class="acts">' + (skill.cards ? '<button class="btn sm quiet" data-show>看规则</button>' : '') + '<button class="btn sm" data-recompile>' + (e.state === 'standby' ? '现在准备' : '重新编译') + '</button></span></div>';
+        + '<span class="acts">' + (skill.cards ? '<button class="btn sm quiet" data-show>看规则</button>' : '') + '<button class="btn sm" data-recompile>重新编译</button></span></div>';
       var show = el.querySelector('[data-show]');
       if(show) show.addEventListener('click', function(){ state.cardFilter = 'skill'; state.cardQuery = name; $('search').value = name; switchView('cards'); renderCards(); });
       var re = el.querySelector('[data-recompile]');
-      re.addEventListener('click', function(){ compileAction('rebuild', name, re, e.state === 'standby' && !skill.stale); });
+      re.addEventListener('click', function(){ compileAction('rebuild', name, re); });
       grid.appendChild(el);
     });
-    $('skills-empty').hidden = names.length > 0;
-    var log = (c.log || []).slice().reverse(), list = $('compile-log');
-    list.innerHTML = log.map(function(item){ return '<li data-l="' + esc(item.level || 'info') + '"><time>' + esc(clock(Date.parse(item.at))) + '</time><i></i><span>' + (item.skill ? '<b>' + esc(item.skill) + '</b>' : '') + esc(item.text) + '</span></li>'; }).join('');
+    $('skills-empty').hidden = used.length > 0 || names.length === 0;
+    $('idle-skills').hidden = idle.length === 0;
+    $('idle-title').textContent = (used.length ? '其余 ' : '') + num(idle.length) + ' 个 skill 还没用到，用到时自动准备';
+    var list = $('idle-list'); list.replaceChildren();
+    idle.forEach(function(name){
+      var skill = byName.get(name) || {};
+      var item = node('span', 'idle-item'); item.title = skill.description || name;
+      item.appendChild(node('b', '', name));
+      var go = node('button', 'linkbtn', '现在准备');
+      go.addEventListener('click', function(){ compileAction('prepare', name, go); });
+      item.appendChild(go);
+      list.appendChild(item);
+    });
+    var log = (c.log || []).slice().reverse();
+    $('compile-log').innerHTML = log.map(logLine).join('');
     $('compile-log-empty').hidden = log.length > 0;
   }
   function renderOverviewCompile(){
     var d = state.data, c = d.compile || {}, entries = c.skills || {}, box = $('overview-compile');
-    var interesting = Object.keys(entries).filter(function(n){ return ['failed', 'retrying', 'compiling', 'queued', 'cancelled'].indexOf(entries[n].state) >= 0; }).slice(0, 4);
-    var html = '<div style="font-weight:560">' + esc(c.summary || (d.skills.length ? d.skills.length + ' 个 skill 全部就绪' : '这个项目没有 skill')) + '</div>';
-    if(interesting.length){
-      html += '<div class="stack" style="margin-top:12px">' + interesting.map(function(n){ var e = entries[n], l = SKILL_STATE[e.state] || [e.state, 'plain']; return '<div><div class="sk-top" style="margin-bottom:5px"><b>' + esc(n) + '</b>' + pill(l[0], l[1]) + '</div>' + docBar(e) + '</div>'; }).join('') + '</div>';
-    } else if(d.skills.length){
-      html += '<div class="tags" style="margin-top:10px">' + d.skills.slice(0, 12).map(function(s){ return pill(s.name, s.stale ? 'warn' : 'ok'); }).join('') + (d.skills.length > 12 ? pill('另 ' + (d.skills.length - 12) + ' 个', 'plain') : '') + '</div>';
+    var used = Object.keys(entries).filter(function(n){ return entries[n].inUse; }).sort();
+    var html = '<div style="font-weight:560">' + esc(c.summary || '—') + '</div>';
+    if(used.length){
+      html += '<div class="tags" style="margin-top:10px">' + used.slice(0, 12).map(function(n){ var e = entries[n], l = skillLabel(e); return pill(e.state === 'ready' && !e.stale ? n : n + ' · ' + l[0], e.state === 'ready' && !e.stale ? 'ok' : l[1]); }).join('') + (used.length > 12 ? pill('另 ' + (used.length - 12) + ' 个', 'plain') : '') + '</div>';
     }
     var last = (c.log || []).slice(-3).reverse();
-    if(last.length) html += '<ul class="log" style="margin:10px -18px -10px">' + last.map(function(item){ return '<li data-l="' + esc(item.level || 'info') + '"><time>' + esc(clock(Date.parse(item.at))) + '</time><i></i><span>' + (item.skill ? '<b>' + esc(item.skill) + '</b>' : '') + esc(item.text) + '</span></li>'; }).join('') + '</ul>';
+    if(last.length) html += '<ul class="log" style="margin:10px -18px -10px">' + last.map(logLine).join('') + '</ul>';
     box.innerHTML = html;
   }
 
@@ -927,10 +973,11 @@
     var rows = [['原文', c.grounded && c.quote ? c.quote : ''], ['什么时候适用', c.when], ['怎样算做到', c.satisfiedWhen], ['不适用', c.notApplicable], ['在这些时候检查', trigs(c.triggers)], ['只针对', scope]];
     if(c.skill && c.source) rows.push(['出处', sourceText(c)]);
     // Rule text comes from model-compiled SKILL.md files: every field is escaped.
-    $('detail-body').innerHTML = '<ul class="rules">' + (c.rules || []).map(function(r){ return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>'
+    // A skill rule is often stated by its quote alone; there is then no separate rule list.
+    $('detail-body').innerHTML = ((c.rules || []).length ? '<ul class="rules">' + c.rules.map(function(r){ return '<li>' + esc(r) + '</li>'; }).join('') + '</ul>' : '')
       + '<dl>' + rows.filter(function(r){ return r[1]; }).map(function(r){ return '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>'; }).join('') + '</dl>'
       + (rel.length ? '<h4>与其他规则的关系</h4><ul style="margin:0;padding-left:18px">' + rel.map(function(e){ return '<li>' + esc(relText(e)) + (e.reason ? '<span class="muted">：' + esc(e.reason) + '</span>' : '') + '</li>'; }).join('') + '</ul>' : '')
-      + '<div class="muted" style="font-size:12px;margin-top:12px">提醒过 ' + num(s.injected) + ' 次' + (followTotal(f.live) ? ' · 提醒后照做 ' + esc(ratio(f.live)) : '') + (followTotal(f.shadow) ? ' · 不提醒时自己做到 ' + esc(ratio(f.shadow)) : '') + (s.lastAt ? ' · 最近一次 ' + esc(ago(s.lastAt)) : '') + '</div>';
+      + '<div class="muted" style="font-size:12px;margin-top:12px">提醒过 ' + num(s.injected) + ' 次' + (followTotal(f.live) ? ' · 后续判定满足 ' + esc(ratio(f.live)) : '') + (followTotal(f.shadow) ? ' · 影子模式满足 ' + esc(ratio(f.shadow)) : '') + (s.lastAt ? ' · 最近一次 ' + esc(ago(s.lastAt)) : '') + '</div>';
     var dialog = $('detail');
     if(!dialog.open){ if(typeof dialog.showModal === 'function') dialog.showModal(); else dialog.setAttribute('open', ''); }
     loadCardHistory(id);
@@ -973,7 +1020,7 @@
       + '<div class="field"><label for="set-' + section + '-provider">服务商</label><span id="slot-' + section + '-provider"></span><div class="hint">' + esc(follow) + '</div></div>'
       + '<div class="field"><label for="set-' + section + '-model">模型</label><span id="slot-' + section + '-model"></span><div class="modelcard" id="info-' + section + '"></div></div>'
       + '<div class="field"><label for="set-' + section + '-reasoningEffort">思考强度</label><span id="slot-' + section + '-reasoningEffort"></span><div class="hint" id="effort-hint-' + section + '"></div>' + (used ? '<div class="note">上次调用：' + esc(used) + '</div>' : '') + '</div>'
-      + '<div class="field"><label for="set-' + section + '-timeoutMs">' + (section === 'decision' ? '最多等几秒' : '每段最多等几秒') + '</label><div class="unit"><input id="set-' + section + '-timeoutMs" type="number" min="1" step="any" value="' + esc(seconds2(values.timeoutMs)) + '"><i>秒</i></div><div class="hint">' + (section === 'decision' ? '模型迟迟不回答时，最多等这么久就放弃这次检查' : '超时会自动重试，做完的部分不会重做') + '</div></div>'
+      + '<div class="field"><label for="set-' + section + '-timeoutMs">' + (section === 'decision' ? '最多等几秒' : '每段最多等几秒') + '</label><div class="unit"><input id="set-' + section + '-timeoutMs" type="number" min="1" step="any" value="' + esc(seconds2(values.timeoutMs)) + '"><i>秒</i></div><div class="hint">' + (section === 'decision' ? '一次判断的总时限，包含排队、重试、展开与复核；已答完的部分保留' : '超时会自动重试，做完的部分不会重做') + '</div></div>'
       + '<div class="field"><label for="set-' + section + '-temperature">随机性</label><input id="set-' + section + '-temperature" type="number" min="0" max="2" step="0.1" value="' + esc(values.temperature) + '"><div class="hint">0–2，越低越稳定</div></div>'
       + (section === 'decision' ? '<div class="field"><label for="set-decision-cacheTtlMs">相同情况几秒内不重复检查</label><div class="unit"><input id="set-decision-cacheTtlMs" type="number" min="0" step="any" value="' + esc(seconds2(values.cacheTtlMs)) + '"><i>秒</i></div></div>' : '')
       + (section === 'compiler' ? '<label class="switch"><input type="checkbox" id="set-compiler-systemAsUser"' + (values.systemAsUser ? ' checked' : '') + '>把系统指令并入用户消息（有的模型服务会报“Incorrect role information”，开着就不会）</label>' : '')
@@ -1124,8 +1171,8 @@
   $('close').addEventListener('click', function(){ window.close(); });
   $('detail-close').addEventListener('click', function(){ $('detail').close(); });
   $('compile-retry').addEventListener('click', function(){ compileAction('retry', undefined, this); });
-  $('compile-cancel').addEventListener('click', function(){ compileAction('cancel', undefined, this); });
-  // Rebuilding everything is expensive: the first click asks, the second confirms.
+  $('prepare-all').addEventListener('click', function(){ compileAction('prepare-all', undefined, this); });
+  // Rebuilding every skill in use costs model calls: the first click asks, the second confirms.
   var rebuildArmed = null;
   $('rebuild').addEventListener('click', function(){
     var b = this;

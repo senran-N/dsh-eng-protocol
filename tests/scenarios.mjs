@@ -59,22 +59,22 @@ function createHost({ skills = [], config = {}, cardOverrides = {} } = {}) {
           let out
           // Compile instructions arrive folded into the user message (the
           // compiler avoids the `developer` role), so detect by prompt content.
-          if (/^\s*You compile one SKILL\.md/.test(`${system ?? ''}${prompt}`)) {
-            const name = /SKILL NAME: (.+)/.exec(prompt)[1].trim()
+          if (/^\s*You read one part of a SKILL\.md/.test(`${system ?? ''}${prompt}`)) {
+            const name = /^SKILL: (.+)$/m.exec(prompt)[1].trim()
             host.compileCalls += 1
             if (host.compileGate?.(name)) await gated(host.compileGate(name), signal)
-            // One obligation per "Rule N" line of the body, quoted verbatim.
-            const body = prompt.split('<skill>\n')[1].split('\n</skill>')[0]
-            const cards = [...body.matchAll(/^Rule (\d+) of \S+ must hold\.$/gm)].map((match) => {
-              const number = Number(match[1])
+            // One obligation per "Rule N" statement, cited by number. An override
+            // with a `quote` answers with text instead, as a careless model would.
+            const lines = [...prompt.matchAll(/^\[(\d+)\] Rule (\d+) of \S+ must hold\.$/gm)].map((match) => {
+              const number = Number(match[2])
               const local = `s${number}`
-              return {
-                id: local, title: `${name} ${local}`, quote: match[0], when: 'x',
-                triggers: SECTION_TRIGGERS[(number - 1) % SECTION_TRIGGERS.length], satisfiedWhen: 'y', rules: ['do it'],
-                ...cardOverrides[name]?.[local],
-              }
+              const { quote, triggers, ...override } = cardOverrides[name]?.[local] ?? {}
+              return JSON.stringify({
+                id: local, title: `${name} ${local}`, ...(quote ? { quote } : { s: [Number(match[1]), Number(match[1])] }),
+                on: triggers ?? SECTION_TRIGGERS[(number - 1) % SECTION_TRIGGERS.length], done: 'y', do: 'do it', ...override,
+              })
             })
-            out = { cards, relations: [] }
+            out = [...lines, '{"end":true}'].join('\n')
           } else {
             const cards = JSON.parse(prompt.split('CANDIDATE CARDS:\n')[1].split('\n\nCritical cards')[0])
             const evidence = JSON.parse(prompt.split('CURRENT EVIDENCE:\n')[1].split('\n\nCANDIDATE CARDS:')[0])
@@ -84,14 +84,20 @@ function createHost({ skills = [], config = {}, cardOverrides = {} } = {}) {
             if (host.fail) throw new Error('judge offline')
             out = { cards: verdicts(call, host.verdict) }
           }
-          yield { type: 'text-delta', text: JSON.stringify(out) }
+          yield { type: 'text-delta', text: typeof out === 'string' ? out : JSON.stringify(out) }
           yield { type: 'finish', reason: { kind: 'stop' } }
         },
       }
     },
   }
   const skillsService = {
-    async list({ scope } = {}) { return (host.skillsByAgent?.[scope?.id] ?? host.skillNames).map((name) => ({ name, description: `Guidance for ${name} projects`, path: `C:/skills/${name}/SKILL.md` })) },
+    // Like the host's catalog, a summary carries everything but the body.
+    async list({ scope } = {}) {
+      return (host.skillsByAgent?.[scope?.id] ?? host.skillNames).map((name) => {
+        const { content, ...metadata } = host.skillOverrides?.[name] ?? {}
+        return { name, description: `Guidance for ${name} projects`, path: `C:/skills/${name}/SKILL.md`, ...metadata }
+      })
+    },
     async get(name) { return { name, description: `Guidance for ${name} projects`, content: bodyOf(name), path: `C:/skills/${name}/SKILL.md`, ...host.skillOverrides?.[name] } },
   }
   const webCtx = { webServer: { register() { return () => {} } }, effect(fn) { return fn() }, on() {} }
@@ -160,8 +166,15 @@ function createHost({ skills = [], config = {}, cardOverrides = {} } = {}) {
       await host.until(async () => (await host.sections(agent, name)).length === count, `${name} compiled`)
     },
     async decisions() {
-      await sleep(30)
-      const text = await readFile(join(host.stateDir, 'decisions.jsonl'), 'utf8').catch(() => '')
+      // Decision records are appended in the background: read once the log stops growing.
+      const read = () => readFile(join(host.stateDir, 'decisions.jsonl'), 'utf8').catch(() => '')
+      let text = ''
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        await sleep(30)
+        const next = await read()
+        if (attempt > 0 && next === text) break
+        text = next
+      }
       return text.split('\n').filter(Boolean).map((line) => JSON.parse(line))
     },
   })
@@ -171,18 +184,314 @@ function createHost({ skills = [], config = {}, cardOverrides = {} } = {}) {
 const checks = []
 function test(name, fn) { checks.push({ name, fn }) }
 
-test('a turn judges the built-ins and only the skills the request points at; nothing compiles', async () => {
+test('a turn semantically routes the whole catalog, including across languages; nothing compiles', async () => {
   const host = createHost({ skills: SKILLS })
   const agent = host.agent('A')
   await host.ready(agent)
   await host.preStep(agent, [user('实现一个新功能')])
   let ids = host.calls.at(-1).ids
-  assert.deepEqual(ids.filter(isEntry), [], 'no skill is relevant, none is judged')
+  assert.deepEqual(new Set(ids.filter(isEntry)), new Set(SKILLS.map(entryOf)), 'lexical mismatch must not hide a skill from the judge')
   assert.equal(ids.filter((id) => BUILTIN.has(id)).length, 11)
   await host.preStep(agent, [user('migrate the postgres schema')])
   ids = host.calls.at(-1).ids
-  assert.deepEqual(ids.filter(isEntry), [entryOf('postgres')])
+  assert.equal(ids.filter(isEntry)[0], entryOf('postgres'), 'lexical relevance orders entries without excluding the others')
+  assert.equal(ids.filter(isEntry).length, SKILLS.length)
   assert.equal(host.compileCalls, 0, 'routing needs no compiled skill')
+})
+
+test('a failure rediscovers an unloaded skill without turning the next edit into an error', async () => {
+  const host = createHost({ skills: SKILLS, config: { cooldownSteps: 10 } })
+  const agent = host.agent('recovery')
+  await host.ready(agent)
+  await host.preStep(agent, [user('修复数据库迁移')])
+  host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'unknown' })
+  host.emit(agent, { type: 'tool/call', data: { callId: 'bad', name: 'pwsh', arguments: { command: 'node migrate.js' } } })
+  host.emit(agent, { type: 'tool/result', data: { message: { source: { callId: 'bad' }, isError: true, content: 'migration failed' } } })
+  assert.match(noticeText(await host.preStep(agent)), /加载 skill：postgres/, 'recovery routes without another human turn')
+  const args = { path: 'db/migrations/001.sql', new_string: 'ALTER TABLE t;' }
+  assert.equal((await host.preExec(agent, 'edit', args, 'edit1')).kind, 'allow', 'scope advice must not manufacture tool failures')
+  await host.postExec(agent, 'edit', args, 'edit1')
+  assert.equal((await host.preExec(agent, 'edit', args, 'edit2')).kind, 'allow')
+  assert.equal(host.compileCalls, 0, 'routing never substitutes a compile for loading')
+})
+
+for (const { trigger, tool, args } of [
+  { trigger: 'first_edit', tool: 'edit', args: { path: 'src/main.ts', new_string: 'fix' }, blocks: true },
+  { trigger: 'check_start', tool: 'pwsh', args: { command: 'npm test' }, blocks: true },
+  { trigger: 'dependency', tool: 'read', args: { path: 'package.json' }, blocks: false },
+  { trigger: 'research', tool: 'web_search', args: { query: 'transaction isolation' }, blocks: false },
+  { trigger: 'delegate', tool: 'subagent', args: { task: 'inspect database migration' }, blocks: false },
+]) {
+  test(`a running task first discovers a skill at ${trigger} and delivers it on the native action channel`, async () => {
+    const host = createHost({ skills: SKILLS })
+    const agent = host.agent(`runtime-${trigger}`)
+    await host.ready(agent)
+    assert.equal(noticeText(await host.preStep(agent, [user('继续处理项目')])), '')
+    host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'inapplicable' })
+    const before = host.calls.length
+    const result = await host.preExec(agent, tool, args, trigger)
+    assert.equal(result.kind, 'allow')
+    const post = await host.postExec(agent, tool, args, trigger)
+    assert.match(post.additionalContexts?.map((message) => message.content[0].text).join('\n') ?? '', /加载 skill：postgres/)
+    const calls = host.calls.slice(before)
+    assert.ok(calls.some((call) => call.boundary === 'tool' && call.triggers.includes(trigger)))
+    assert.ok(calls.every((call) => !call.triggers.includes('turn')), 'no new human turn causes this discovery')
+    assert.deepEqual(new Set(calls.flatMap((call) => call.ids.filter(isEntry))), new Set(SKILLS.map(entryOf)))
+    assert.equal(host.compileCalls, 0, 'the reminder does not silently load or compile the skill')
+    assert.equal(host.standing(agent), '', 'an unloaded skill has no standing obligations')
+    host.dispose(agent)
+  })
+}
+
+test('a skill judgment runs alongside a live tool and its delayed result reaches the model before the next request', async () => {
+  const host = createHost({ skills: ['postgres'] })
+  const agent = host.agent('runtime-delayed')
+  await host.ready(agent)
+  await host.preStep(agent, [user('检查数据库')])
+  let release
+  host.gate = new Promise((resolve) => { release = resolve })
+  host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'inapplicable' })
+  const args = { query: 'migration docs' }
+  assert.equal((await host.preExec(agent, 'web_search', args, 'search')).kind, 'allow', 'tool starts while the judge is still waiting')
+  let finished = false
+  const post = host.postExec(agent, 'web_search', args, 'search').then((result) => { finished = true; return result })
+  await sleep(0)
+  assert.equal(finished, false, 'post-execute waits for the pending advice instead of losing it')
+  release()
+  const result = await post
+  assert.match(result.additionalContexts[0].content[0].text, /加载 skill：postgres/)
+  assert.equal(agent.injected.length, 0, 'runtime advice uses the tool result, without waiting for turn-stopping')
+  assert.equal(noticeText(await host.preStep(agent)), '', 'the next request does not duplicate the delivered advice')
+  host.dispose(agent)
+})
+
+test('skill advice preserves real shell output and repeated echo calls never become plugin failures', async () => {
+  const host = createHost({ skills: ['postgres'] })
+  const agent = host.agent('echo-output')
+  await host.ready(agent)
+  host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'unknown' })
+  await host.preStep(agent, [user('数据库迁移')])
+  // Next step permits a fresh reminder; the original load request persists.
+  await host.preStep(agent)
+  const output = { isError: false, content: [{ type: 'text', text: 'ok\n[exit code: 0]' }] }
+  const original = structuredClone(output)
+  for (let i = 0; i < 3; i += 1) {
+    const args = { command: `echo ${i === 0 ? 'ok' : i}` }
+    assert.equal((await host.preExec(agent, 'pwsh', args, `echo${i}`)).kind, 'allow')
+    const post = await host.postExec(agent, 'pwsh', args, `echo${i}`, output)
+    assert.deepEqual(output, original)
+    assert.equal(post.content, undefined, 'plugin must not override the original tool output')
+    assert.equal(post.kind, 'accept')
+    if (i === 0) {
+      const text = post.additionalContexts[0].content[0].text
+      assert.match(text, /独立协议提醒/)
+      assert.match(text, /不表示工具失败或输出丢失/)
+      assert.match(text, /加载 skill：postgres/)
+    }
+  }
+  assert.ok(!(await host.decisions()).some((record) => record.blocked))
+  host.dispose(agent)
+})
+
+test('runtime discovery leads through native skill loading to grounded requirements and later obligation advice', async () => {
+  const host = createHost({ skills: ['postgres'] })
+  const agent = host.agent('runtime-lifecycle')
+  await host.ready(agent)
+  await host.preStep(agent, [user('修复迁移')])
+  host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'inapplicable' })
+  host.emit(agent, { type: 'tool/call', data: { callId: 'failure', name: 'pwsh', arguments: { command: 'node migrate.js' } } })
+  host.emit(agent, { type: 'tool/result', data: { message: { source: { callId: 'failure' }, isError: true, content: 'migration failed' } } })
+  assert.match(noticeText(await host.preStep(agent)), /加载 skill：postgres/)
+  assert.equal(host.compileCalls, 0)
+  await host.load(agent, 'postgres')
+  await host.compiled(agent, 'postgres')
+  assert.equal(host.compileCalls, 1)
+  assert.match(host.standing(agent), /Rule 1 of postgres must hold\./)
+  host.verdict = (id) => ({ state: id === 'skill_postgres_s1' ? 'needed' : id === entryOf('postgres') ? 'satisfied' : 'inapplicable' })
+  const args = { path: 'db/migration.sql', new_string: 'ALTER TABLE t ADD COLUMN n int;' }
+  assert.equal((await host.preExec(agent, 'edit', args, 'after-load')).kind, 'allow', 'an advisory obligation does not become a checkpoint')
+  const result = await host.postExec(agent, 'edit', args, 'after-load')
+  const text = result.additionalContexts[0].content[0].text
+  assert.match(text, /\[card: skill_postgres_s1/)
+  assert.match(text, /Rule 1 of postgres must hold\./)
+  assert.doesNotMatch(text, /加载 skill：postgres/)
+  const record = (await host.decisions()).find((record) => record.injected && record.assessments?.skill_postgres_s1?.state === 'needed')
+  assert.ok(record, 'the actual obligation delivery is persisted, not just a positive routing judgment')
+  host.dispose(agent)
+})
+
+test('new failures recheck active obligations and bypass cooldown, while quiet steps stay quiet', async () => {
+  const host = createHost({ skills: ['postgres'], config: { cooldownSteps: 10 } })
+  const agent = host.agent('repeated-failure')
+  await host.ready(agent)
+  await host.preStep(agent, [user('修复数据库迁移')])
+  await host.load(agent, 'postgres')
+  await host.compiled(agent, 'postgres')
+  host.verdict = (id) => ({ state: id === 'skill_postgres_s1' ? 'needed' : 'unknown' })
+  const fail = async (callId) => {
+    host.emit(agent, { type: 'tool/call', data: { callId, name: 'pwsh', arguments: { command: 'node migrate.js' } } })
+    host.emit(agent, { type: 'tool/result', data: { message: { source: { callId }, isError: true, content: 'migration failed' } } })
+    return host.preStep(agent)
+  }
+  assert.match(noticeText(await fail('f1')), /\[card: skill_postgres_s1/, 'even an edit-only obligation is rechecked after failure')
+  assert.match(noticeText(await fail('f2')), /\[card: skill_postgres_s1/, 'fresh failure evidence bypasses cooldown')
+  const before = host.calls.length
+  assert.equal(noticeText(await host.preStep(agent)), '')
+  assert.equal(host.calls.length, before, 'no unconditional polling')
+})
+
+test('an ignored load request follows the next ordinary command and clears when loaded or the task changes', async () => {
+  const host = createHost({ skills: ['postgres'], config: { cooldownSteps: 10 } })
+  const agent = host.agent('ignored-load')
+  await host.ready(agent)
+  host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'unknown' })
+  await host.preStep(agent, [user('迁移数据库')])
+  const allowed = await host.preExec(agent, 'pwsh', { command: 'node migrate.js' }, 'migrate')
+  assert.equal(allowed.kind, 'allow', 'an outstanding scope recommendation is not a failed command')
+  await host.postExec(agent, 'pwsh', { command: 'node migrate.js' }, 'migrate')
+  const retryArgs = { command: 'node migrate.js' }
+  assert.equal((await host.preExec(agent, 'pwsh', retryArgs, 'migrate-retry')).kind, 'allow')
+  await host.postExec(agent, 'pwsh', retryArgs, 'migrate-retry')
+  const retryRecord = (await host.decisions()).find((record) => record.callId === 'migrate-retry')
+  assert.equal(retryRecord.cacheHit, true)
+  assert.equal(retryRecord.delivery, 'superseded')
+  assert.equal(retryRecord.deliveryRecorded, false, 'an undelivered cached duplicate must not open a new follow-up watcher')
+  await host.load(agent, 'postgres')
+  assert.equal((await host.preExec(agent, 'pwsh', { command: 'node migrate.js --apply' }, 'loaded')).kind, 'allow')
+
+  host.verdict = () => ({ state: 'unknown' })
+  await host.preStep(agent, [user('改为写诗')])
+  const before = host.calls.length
+  assert.equal((await host.preExec(agent, 'pwsh', { command: 'node poem.js' }, 'unrelated')).kind, 'allow')
+  assert.equal(host.calls.length, before, 'old task recommendations do not follow the new task')
+})
+
+test('a continuation still routes the skill using the complete original task and constraints', async () => {
+  const host = createHost({ skills: ['postgres'] })
+  const agent = host.agent('continue-task')
+  await host.ready(agent)
+  const original = '任务背景。'.repeat(600) + '迁移 postgres 数据库，并提供可执行的回滚步骤。'
+  await host.preStep(agent, [user(original)])
+  host.verdict = (id, call) => {
+    assert.deepEqual(call.evidence.taskRequests, [original, '继续'])
+    return { state: id === entryOf('postgres') ? 'needed' : 'unknown' }
+  }
+  const resumed = await host.preStep(agent, [user('继续')])
+  assert.match(noticeText(resumed), /加载 skill：postgres/)
+  assert.equal((await host.preExec(agent, 'pwsh', { command: 'node migrate.js' }, 'continue-migrate')).kind, 'allow')
+  await host.postExec(agent, 'pwsh', { command: 'node migrate.js' }, 'continue-migrate')
+})
+
+test('edit verdict cache distinguishes different content in the same file', async () => {
+  const host = createHost()
+  const agent = host.agent('edit-cache')
+  await host.preStep(agent, [user('调整同一个文件的两处实现')])
+  const first = { path: 'src/app.js', old_string: 'original', new_string: 'first replacement' }
+  await host.preExec(agent, 'edit', first, 'first')
+  await host.postExec(agent, 'edit', first, 'first')
+  const calls = host.calls.length
+  const second = { ...first, new_string: 'second replacement with a different condition' }
+  await host.preExec(agent, 'edit', second, 'second')
+  await host.postExec(agent, 'edit', second, 'second')
+  assert.equal(host.calls.length, calls + 1, 'the changed proposal requires a fresh judgment')
+  assert.match(host.calls.at(-1).evidence.action.excerpt, /different condition/)
+  await host.preExec(agent, 'edit', second, 'identical-retry')
+  await host.postExec(agent, 'edit', second, 'identical-retry')
+  assert.equal(host.calls.length, calls + 1, 'an identical proposal at unchanged evidence still reuses the cache')
+  const cached = (await host.decisions()).find((record) => record.cacheHit)
+  assert.equal(cached.callId, 'identical-retry', 'trajectory links must identify this call, not the cached original')
+  assert.ok(cached.cachedFrom, 'the original judgment remains traceable')
+})
+
+test('a failed edit target stays available to file-scoped skill recovery', async () => {
+  const host = createHost({ skills: ['postgres'], cardOverrides: { postgres: { s1: { paths: ['**/*.sql'] } } } })
+  const agent = host.agent('failed-path')
+  await host.ready(agent)
+  await host.preStep(agent, [user('迁移数据库')])
+  await host.load(agent, 'postgres')
+  await host.compiled(agent, 'postgres')
+  const args = { path: 'db/001.sql', old_string: 'missing', new_string: 'replacement' }
+  await host.preExec(agent, 'edit', args, 'bad-edit')
+  host.emit(agent, { type: 'tool/call', data: { callId: 'bad-edit', name: 'edit', arguments: args } })
+  host.emit(agent, { type: 'tool/result', data: { message: { source: { callId: 'bad-edit' }, isError: true, content: 'old string not found' } } })
+  host.verdict = (id) => ({ state: id === 'skill_postgres_s1' ? 'needed' : 'unknown' })
+  assert.match(noticeText(await host.preStep(agent)), /skill_postgres_s1/, 'a failed edit is not in filesEdited, but its path still scopes recovery')
+})
+
+test('uncertain grounded duties get an explicit verification reminder at delivery, never an action block', async () => {
+  const host = createHost({ skills: ['postgres'], cardOverrides: { postgres: { s1: { triggers: ['edit', 'settle'], checkpoint: true } } } })
+  const agent = host.agent('verify-unknown')
+  await host.ready(agent)
+  await host.preStep(agent, [user('迁移数据库')])
+  await host.load(agent, 'postgres')
+  await host.compiled(agent, 'postgres')
+  host.verdict = (id) => ({ state: 'unknown', confidence: id === 'skill_postgres_s1' ? 0.55 : 0 })
+  host.emit(agent, { type: 'tool/call', data: { callId: 'failed-check', name: 'pwsh', arguments: { command: 'node migrate.js' } } })
+  host.emit(agent, { type: 'tool/result', data: { message: { source: { callId: 'failed-check' }, isError: true, content: 'migration failed' } } })
+  const args = { path: 'db/001.sql' }
+  assert.equal((await host.preExec(agent, 'edit', args, 'uncertain')).kind, 'allow', 'unknown never blocks a checkpoint')
+  const post = await host.postExec(agent, 'edit', args, 'uncertain')
+  assert.match(post.additionalContexts[0].content[0].text, /核对提醒，不是已发生违规的结论/, 'failure recovery advice rides the result without blocking')
+  await host.settle(agent, 1)
+  const text = agent.injected.map((message) => message.content[0].text).join('\n')
+  assert.match(text, /skill_postgres_s1/)
+  assert.match(text, /核对提醒，不是已发生违规的结论/)
+  const record = (await host.decisions()).find((record) => record.boundary === 'settle')
+  assert.equal(record.reasons.skill_postgres_s1.kind, 'verification')
+  assert.equal(record.assessments.skill_postgres_s1.state, 'unknown', 'record keeps the actual uncertain assessment')
+})
+
+test('heartbeat and delivery rediscover missed skills; a heartbeat also rechecks active obligations', async () => {
+  const host = createHost({ skills: SKILLS, config: { heartbeatSteps: 2, cooldownSteps: 10 } })
+  const agent = host.agent('heartbeat')
+  await host.ready(agent)
+  await host.preStep(agent, [user('处理文档')])
+  await host.load(agent, 'docx')
+  await host.compiled(agent, 'docx')
+  host.verdict = (id) => ({ state: [entryOf('pdf'), 'skill_docx_s1'].includes(id) ? 'needed' : 'unknown' })
+  for (let step = 1; step <= 2; step += 1) host.emit(agent, { type: 'step/start', data: { step } })
+  const text = noticeText(await host.preStep(agent))
+  assert.match(text, /加载 skill：pdf/)
+  assert.match(text, /\[card: skill_docx_s1/)
+  host.verdict = (id) => ({ state: [entryOf('xlsx'), entryOf('pdf')].includes(id) ? 'needed' : 'unknown' })
+  await host.settle(agent, 1)
+  assert.match(agent.injected.map((message) => message.content[0].text).join('\n'), /加载 skill：xlsx/)
+  assert.match(agent.injected.map((message) => message.content[0].text).join('\n'), /加载 skill：pdf/, 'an ignored load is reconsidered at delivery despite cooldown')
+})
+
+test('routing on an intermediate action cannot retire a loaded skill for the whole task', async () => {
+  const host = createHost({ skills: ['postgres'] })
+  const agent = host.agent('task-scope')
+  await host.ready(agent)
+  await host.preStep(agent, [user('migrate the postgres schema')])
+  await host.load(agent, 'postgres')
+  await host.compiled(agent, 'postgres')
+  host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'inapplicable' : 'unknown' })
+  await host.preExec(agent, 'edit', { path: 'docs/notes.md' }, 'unrelated')
+  assert.match((await host.command(agent, 'status')).text, /正在用的 skill：postgres/)
+  assert.match(host.standing(agent), /postgres/)
+  await host.preStep(agent, [user('switch to writing a poem')])
+  assert.match((await host.command(agent, 'status')).text, /正在用的 skill：暂时没有/, 'a new task can still retire it')
+})
+
+test('skill routing respects shadow mode and disabled enforcement at the action boundary', async () => {
+  for (const config of [{ shadow: true }, { enforcement: { enabled: false } }]) {
+    const host = createHost({ skills: ['postgres'], config })
+    const agent = host.agent(`routing-${Boolean(config.shadow)}`)
+    await host.ready(agent)
+    await host.preStep(agent, [user('数据库迁移')])
+    host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'unknown' })
+    const args = { path: 'db/migrations/001.sql' }
+    assert.equal((await host.preExec(agent, 'edit', args, 'edit')).kind, 'allow')
+    const post = await host.postExec(agent, 'edit', args, 'edit')
+    if (config.shadow) {
+      assert.equal(post.additionalContexts, undefined)
+      assert.equal(agent.injected.length, 0)
+      assert.ok((await host.decisions()).some((record) => record.wouldInject && !record.wouldBlock && !record.blocked))
+    } else {
+      assert.match(post.additionalContexts[0].content[0].text, /加载 skill：postgres/)
+    }
+  }
 })
 
 test('a routed skill gets a load nudge, never a paraphrase; once loaded its entry only decides scope', async () => {
@@ -213,11 +522,17 @@ test('loading a skill puts it in scope without a judge call and compiles it once
   assert.match((await host.command(agent, 'status')).text, /正在用的 skill：docx/)
   await host.preExec(agent, 'edit', { path: 'src/a.ts', old_string: 'a', new_string: 'b' }, 'e1')
   assert.ok(sectionsOf('docx', host.calls.at(-1).ids).length > 0)
-  assert.ok(!host.calls.at(-1).ids.some((id) => id.startsWith('skill_') && !id.startsWith('skill_docx_')), 'no other skill is in scope')
-  // A second agent (a subagent, another session) finds the compile already stored.
+  assert.ok(!host.calls.at(-1).ids.some((id) => id.startsWith('skill_') && !isEntry(id) && !id.startsWith('skill_docx_')), 'other skills can be routed, but their obligations are not in scope')
+  // A second agent may restore prepared cards asynchronously, but they cannot
+  // enter its active scope until it really loads the skill.
   const other = host.agent('B')
   await host.ready(other)
-  assert.equal((await host.sections(other, 'docx')).length, SECTION_TRIGGERS.length, 'stored obligations are visible at once')
+  assert.equal(host.standing(other), '', 'a cached compile does not load the skill into another agent')
+  const beforeOtherEdit = host.calls.length
+  const otherArgs = { path: 'src/other.ts', new_string: 'change' }
+  await host.preExec(other, 'edit', otherArgs, 'other-edit')
+  await host.postExec(other, 'edit', otherArgs, 'other-edit')
+  assert.ok(host.calls.slice(beforeOtherEdit).every((call) => sectionsOf('docx', call.ids).length === 0), 'cached rules are not judged for an agent that never loaded the skill')
   await host.load(other, 'docx')
   await host.compiled(other, 'docx')
   assert.equal(host.compileCalls, 1, 'compiled once, shared by content')
@@ -252,7 +567,8 @@ test('standing context carries the loaded skills\' verified requirements, checkp
   assert.equal(host.standing(agent), '', 'nothing before a skill is loaded')
   assert.equal(host.standingSpec().interpolate, false, 'quoted skill text is never a prompt template')
   await host.load(agent, 'postgres')
-  await host.compiled(agent, 'postgres')
+  // The invented sentence never becomes a rule.
+  await host.compiled(agent, 'postgres', SECTION_TRIGGERS.length - 1)
   const text = host.standing(agent)
   assert.match(text, /^<eng-protocol-standing>/)
   assert.match(text, /## postgres/)
@@ -264,7 +580,7 @@ test('standing context carries the loaded skills\' verified requirements, checkp
   assert.equal(host.standing(agent), '', 'shadow mode never touches the conversation')
 })
 
-test('a grounded skill checkpoint blocks the matching action once; an ungrounded one only advises', async () => {
+test('a grounded skill checkpoint blocks the matching action once; one without a source never exists', async () => {
   const host = createHost({
     skills: ['postgres'],
     cardOverrides: { postgres: { s1: { checkpoint: true, paths: ['**/*.sql'] }, s7: { checkpoint: true, quote: 'Never an invented sentence.' } } },
@@ -273,12 +589,12 @@ test('a grounded skill checkpoint blocks the matching action once; an ungrounded
   await host.ready(agent)
   await host.preStep(agent, [user('migrate the postgres schema')])
   await host.load(agent, 'postgres')
-  await host.compiled(agent, 'postgres')
+  await host.compiled(agent, 'postgres', SECTION_TRIGGERS.length - 1)
   host.verdict = (id) => ({ state: ['skill_postgres_s1', 'skill_postgres_s7'].includes(id) ? 'needed' : 'unknown' })
   // Not a .sql file: the checkpoint's file predicate keeps it out of the question entirely.
   assert.equal((await host.preExec(agent, 'edit', { path: 'src/app.ts' }, 'ts')).kind, 'allow')
   assert.ok(!host.calls.at(-1).ids.includes('skill_postgres_s1'))
-  assert.ok(host.calls.at(-1).ids.includes('skill_postgres_s7'), 'the ungrounded card is still judged, as advice')
+  assert.ok(!host.calls.at(-1).ids.includes('skill_postgres_s7'), 'a checkpoint the skill never states is not a rule at all')
   const denied = await host.preExec(agent, 'edit', { path: 'db/migrations/002.sql' }, 'sql1')
   assert.equal(denied.kind, 'deny')
   assert.match(denied.reason, /skill_postgres_s1/)
@@ -382,6 +698,9 @@ test('a judge outage still blocks a destructive command once', async () => {
   const denied = await host.preExec(agent, 'pwsh', { command: 'rm -rf build' }, 'r1')
   assert.equal(denied.kind, 'deny')
   assert.match(denied.reason, /\[card: halt\]/)
+  assert.match(denied.reason, /^eng-protocol 执行前暂停/)
+  assert.match(denied.reason, /本次工具尚未执行/)
+  assert.equal(denied.info.code, 'ENG_PROTOCOL_BLOCKED')
   assert.equal((await host.preExec(agent, 'pwsh', { command: 'rm -rf build' }, 'r2')).kind, 'allow')
   assert.equal((await host.preExec(agent, 'pwsh', { command: 'git push --dry-run' }, 'r3')).kind, 'allow')
   const record = (await host.decisions()).find((item) => item.blocked)
@@ -443,10 +762,12 @@ test('shadow mode judges and records without touching the conversation', async (
   assert.equal(step.messages.length, 1)
   assert.equal((await host.preExec(agent, 'pwsh', { command: 'rm -rf build' }, 's1')).kind, 'allow')
   assert.equal((await host.postExec(agent, 'pwsh', { command: 'rm -rf build' }, 's1')).additionalContexts, undefined)
+  host.emit(agent, { type: 'tool/call', data: { callId: 's1', name: 'pwsh', arguments: { command: 'rm -rf build' } } })
+  host.emit(agent, { type: 'tool/result', data: { message: { source: { callId: 's1' }, content: 'done' } } })
   await host.settle(agent, 1)
   assert.equal(agent.injected.length, 0)
-  await host.until(async () => (await host.decisions()).length >= 3, 'three decisions')
-  const records = await host.decisions()
+  await host.until(async () => (await host.decisions()).filter((record) => record.kind === 'decision').length >= 3, 'three decisions')
+  const records = (await host.decisions()).filter((record) => record.kind === 'decision')
   assert.ok(records.every((record) => record.shadow === true && record.injected === false))
   assert.ok(records.some((record) => record.wouldInject))
   assert.ok(records.some((record) => record.wouldBlock && !record.blocked))
@@ -469,7 +790,7 @@ test('a skill edited while it compiles: the old compile guards, the new text com
   host.skillsChanged()
   await host.until(() => host.compileCalls === 2, 'the edited skill to start compiling')
   assert.equal((await host.sections(agent, 'alpha')).length, SECTION_TRIGGERS.length, 'the previous compile keeps guarding meanwhile')
-  assert.match((await host.command(agent, 'skills')).text, /(准备中|等待中)\talpha/)
+  assert.match((await host.command(agent, 'skills')).text, /(准备中|排队中)\talpha/)
   // A second change notice while compiling joins the same run instead of restarting it.
   host.skillsChanged()
   release()
@@ -477,7 +798,7 @@ test('a skill edited while it compiles: the old compile guards, the new text com
   await sleep(30)
   assert.equal(host.compileCalls, 2)
   assert.equal((await host.sections(agent, 'alpha')).length, SECTION_TRIGGERS.length + 1)
-  assert.match((await host.command(agent, 'status')).text, /1 个 skill 全部就绪/)
+  assert.match((await host.command(agent, 'status')).text, /用到的 1 个 skill 都已就绪/)
 })
 
 test('manual-only skills need explicit invocation; a failed load does not activate', async () => {
@@ -599,6 +920,45 @@ test('a new turn with more rules than one wave holds judges entry cards first an
   assert.equal(unexpanded.length, big, 'the rules left unexpanded are still listed')
   assert.deepEqual(record.reasons[unexpanded[0]], { kind: 'scope', by: entryOf('postgres') })
   assert.match((await host.command(agent, 'status')).text, /正在用的 skill：android$/m, 'skills out of scope leave the session')
+})
+
+test('concurrent identical calls consume only one soft block per turn', async () => {
+  const host = createHost()
+  const agent = host.agent('concurrent-soft-block')
+  await host.preStep(agent, [user('inspect the repository')])
+  host.verdict = id => ({ state: id === 'halt' ? 'needed' : 'unknown' })
+  let release
+  host.gate = new Promise(resolve => { release = resolve })
+  const before = host.calls.length
+  const args = { command: 'git push origin main' }
+  const first = host.preExec(agent, 'pwsh', args, 'parallel-1')
+  const second = host.preExec(agent, 'pwsh', args, 'parallel-2')
+  await host.until(() => host.calls.length >= before + 2, 'both overlapping judgments')
+  release()
+  const decisions = await Promise.all([first, second])
+  assert.deepEqual(decisions.map(d => d.kind).sort(), ['allow', 'deny'])
+  assert.equal((await host.decisions()).filter(r => r.kind === 'decision' && r.blocked).length, 1)
+})
+
+test('a recompiled rule cannot reuse a cached verdict for the previous definition', async () => {
+  const overrides = { android: {} }
+  const host = createHost({ skills: ['android'], config: { builtinCards: false }, cardOverrides: overrides })
+  const agent = host.agent('cache-source-change')
+  await host.ready(agent)
+  await host.load(agent, 'android')
+  await host.compiled(agent, 'android')
+  host.verdict = () => ({ state: 'satisfied' })
+  const args = { path: 'app.js', content: 'change' }
+  await host.preExec(agent, 'write', args, 'old-rule')
+  await host.postExec(agent, 'write', args, 'old-rule')
+  const before = host.calls.length
+  // Recompilation identifies a checkpoint without changing the card's id.
+  overrides.android.s1 = { before: true }
+  await host.command(agent, 'rebuild android')
+  await host.until(() => host.standing(agent).includes('动手前：'), 'changed checkpoint to compile')
+  await host.preExec(agent, 'write', args, 'new-rule')
+  await host.postExec(agent, 'write', args, 'new-rule')
+  assert.ok(host.calls.length > before, 'a new graph requires a new judgment even when card ids stay stable')
 })
 
 let failed = 0

@@ -52,35 +52,35 @@ test('compiled obligations are grounded in the skill text and linked to built-in
     name: 'android-ui', description: 'Android UI', path: 'C:/skills/android-ui/SKILL.md', hash: 'abc',
     content: '# UI\nUse Material.\n## Layout\nPrefer ConstraintLayout for nested screens.\n## A11y\nEvery interactive control needs a contentDescription.',
   }
+  // Statements: [1] # UI  [2] Use Material.  [3] ## Layout  [4] Prefer…  [5] ## A11y  [6] Every…
   const graph = normalizeCompiled({
-    entry: { title: 'ignored', when: 'an entry from the model is not used', points: ['x', 'y'] },
     cards: [
-      { id: 'layout', title: 'Layout constraints', quote: 'Prefer ConstraintLayout for nested screens.', when: 'editing layout XML', triggers: ['edit'], satisfiedWhen: 'layout builds', rules: ['Prefer ConstraintLayout'], paths: ['res/layout/**', 'C:\\bad\0'] },
-      { id: 'a11y', title: 'Accessibility', quote: 'every interactive control needs a **contentDescription**', when: 'adding interactive controls', triggers: ['edit', 'settle'], satisfiedWhen: 'content descriptions exist', rules: ['Add contentDescription'], checkpoint: true, entry: true, critical: true },
-      { id: 'invented', title: 'Invented', quote: 'Always use Jetpack Compose.', when: 'editing screens', triggers: ['edit'], satisfiedWhen: 'compose used', rules: ['Use Compose'], checkpoint: true },
+      { id: 'layout', title: 'Layout constraints', s: [4, 4], on: ['edit'], done: 'layout builds', paths: ['res/layout/**', 'C:\\bad\0'] },
+      { id: 'a11y', title: 'Accessibility', quote: 'every interactive control needs a **contentDescription**', triggers: ['edit', 'settle'], satisfiedWhen: 'content descriptions exist', rules: ['Add contentDescription'], checkpoint: true, entry: true, critical: true },
+      { id: 'invented', title: 'Invented', quote: 'Always use Jetpack Compose.', triggers: ['edit'], checkpoint: true },
     ],
     relations: [
       { type: 'requires', source: 'layout', target: 'a11y', reason: 'layout first' },
-      { type: 'covers', source: 'a11y', target: 'verify', reason: 'same check' },
+      { rel: 'covers', from: 'a11y', to: 'builtin:verify', reason: 'same check' },
     ],
   }, skill)
-  const [layout, a11y, invented] = graph.cards
-  assert.equal(graph.cards.length, 3)
-  // A found quote yields the source's own words and the lines they really occupy.
+  const [layout, a11y] = graph.cards
+  // A sentence that is not in the skill never becomes a rule.
+  assert.equal(graph.cards.length, 2)
+  assert.ok(graph.diagnostics.some((item) => item.code === 'no-source' && item.id === 'invented'))
+  // A cited statement is the source's own words, on the lines it really occupies.
   assert.equal(layout.grounded, true)
   assert.equal(layout.quote, 'Prefer ConstraintLayout for nested screens.')
-  assert.deepEqual([layout.sourceRef.startLine, layout.sourceRef.endLine, layout.sourceRef.basis], [4, 4, 'verified-quote'])
+  assert.deepEqual([layout.sourceRef.startLine, layout.sourceRef.endLine, layout.sourceRef.basis], [4, 4, 'statement'])
   assert.deepEqual(layout.match, { paths: ['res/layout/**'], commands: [] }, 'an invalid glob is dropped, not fatal')
-  // Case and Markdown emphasis do not break a verbatim quote; hostile flags are not copied.
+  assert.deepEqual(layout.rules, [], 'the quote states the rule; nothing is paraphrased')
+  // A quoted answer is located despite case and Markdown emphasis; hostile flags are not copied.
   assert.equal(a11y.grounded, true)
   assert.equal(a11y.quote, 'Every interactive control needs a contentDescription')
+  assert.equal(a11y.sourceRef.basis, 'quote')
   assert.equal(a11y.checkpoint, true)
   assert.deepEqual([a11y.entry, a11y.critical], [false, false])
-  // An invented sentence stays advisory and can never be a checkpoint.
-  assert.equal(invented.grounded, false)
-  assert.equal(invented.checkpoint, undefined)
-  assert.equal(invented.sourceRef.basis, 'input-range')
-  assert.ok(graph.warnings.some((warning) => warning.includes('只作参考提醒')))
+  assert.ok(graph.relations.some((edge) => edge.type === 'requires' && edge.source === layout.id && edge.target === a11y.id))
   assert.ok(graph.relations.some((edge) => edge.type === 'covers' && edge.target === 'verify'))
   const merged = buildGraph('C:/project', new Map([['android-ui', graph]]))
   assert.ok(merged.cards.some((card) => card.id === `skill_${slug('android-ui')}_entry` && card.entry))
@@ -159,7 +159,7 @@ test('patch tools expose the files they touch', () => {
   assert.deepEqual(actionTriggers(envelope, 1), ['edit', 'test_edit', 'dependency'])
 })
 
-test('routing judges loaded skills plus a relevant shortlist; obligations need scope and matching files', () => {
+test('routing judges every callable entry, ordered by relevance; obligations need scope and matching files', () => {
   const topics = ['android', 'postgres', 'docx', 'pptx', 'xlsx', 'pdf', 'kotlin', 'swift', 'terraform', 'docker', 'react', 'vue']
   const graphs = new Map(topics.map((name) => {
     const skill = { name, description: `Guidance for ${name} work`, path: `C:/skills/${name}/SKILL.md`, hash: name, content: '# Rules\nEdit rule text here.\nCheck rule text here.' }
@@ -175,15 +175,16 @@ test('routing judges loaded skills plus a relevant shortlist; obligations need s
   const entryOf = (name) => `skill_${slug(name)}_entry`
   const entries = (list) => list.filter((card) => card.entry).map((card) => card.id)
 
-  // More skills than the shortlist and nothing relevant: no skill is routed, built-ins still are.
+  // No lexical match: the semantic judge still sees every callable entry.
   const quiet = candidateCards(cards, { triggers: ['turn'], query: '实现一个新功能' })
-  assert.deepEqual(entries(quiet), [])
+  assert.deepEqual(new Set(entries(quiet)), new Set(topics.map(entryOf)))
   assert.equal(quiet.filter((card) => !card.skill).length, BUILTIN_CARDS.filter((card) => card.triggers.includes('turn')).length)
   assert.ok(quiet[0].critical, 'critical built-ins lead')
   // Loaded skills are always re-checked; named and relevant skills join them.
   const routed = entries(candidateCards(cards, { triggers: ['turn'], active: new Set(['terraform']), query: 'fix the android layout, then use docker; reactive streams' }))
   assert.equal(routed[0], entryOf('terraform'))
-  assert.deepEqual(new Set(routed), new Set([entryOf('terraform'), entryOf('android'), entryOf('docker')]), 'a name inside another word is not a mention')
+  assert.deepEqual(routed.slice(0, 3), [entryOf('terraform'), entryOf('android'), entryOf('docker')], 'loaded and explicitly named skills lead')
+  assert.equal(routed.length, topics.length, 'neither lexical mismatch nor the former eight-entry limit cuts off skills')
   // A skill load is not a judge question: it activates directly.
   assert.deepEqual(entries(candidateCards(cards, { triggers: ['skill'], invoked: 'docx' })), [])
   // A small catalog is judged in full.
@@ -196,9 +197,12 @@ test('routing judges loaded skills plus a relevant shortlist; obligations need s
   assert.deepEqual(sql({ action: { kind: 'edit', path: 'src/a.ts' } }), [])
   assert.deepEqual(sql({ action: { kind: 'edit', path: 'D:\\repo\\db\\001_init.sql' } }), ['skill_postgres_edit_rule'])
   assert.deepEqual(sql({ files: ['db/002.sql'] }), ['skill_postgres_edit_rule'])
+  const recovering = (path) => candidateCards(cards, { triggers: ['failed'], active: new Set(['postgres']), files: [path] }).filter((card) => card.skill === 'postgres' && !card.entry).map((card) => card.id)
+  assert.deepEqual(recovering('src/a.ts'), ['skill_postgres_check_rule'], 'recovery still respects file predicates')
+  assert.deepEqual(recovering('db/002.sql'), ['skill_postgres_edit_rule', 'skill_postgres_check_rule'], 'recovery rechecks obligations regardless of their compiled triggers')
   // Every loaded skill's obligations are asked; nothing is cut to a budget, and skills take turns.
   const shared = candidateCards(cards, { triggers: ['edit', 'check_start'], active: new Set(topics), action: { kind: 'edit', path: 'src/a.ts' } })
-  assert.equal(shared.filter((card) => card.skill).length, 23)
+  assert.equal(shared.filter((card) => card.skill && !card.entry).length, 23)
   assert.equal(new Set(shared.slice(-10).map((card) => card.skill)).size, 10, 'a batch boundary never starves the last skills')
 })
 
@@ -357,25 +361,24 @@ test('follow-up separates reminded outcomes from the shadow baseline', () => {
   const totals = aggregate([
     { kind: 'decision', sessionId: 's1', selected: ['verify'], injected: true, delivery: 'delivered', turn: 1, evidenceSeq: 1, responseSeq: 0, deliveryEvidenceSeq: 1, deliveryResponseSeq: 0, assessments: { verify: { state: 'needed' } } },
     { kind: 'decision', sessionId: 's1', selected: [], assessments: { verify: { state: 'unknown' } }, turn: 1, evidenceSeq: 2, responseSeq: 0 },
-    { kind: 'decision', sessionId: 's1', selected: [], assessments: { verify: { state: 'satisfied' } }, turn: 1, evidenceSeq: 3, responseSeq: 1 },
+    { kind: 'decision', sessionId: 's1', selected: [], assessments: { verify: { state: 'satisfied', confidence: 0.9 } }, turn: 1, evidenceSeq: 3, responseSeq: 1 },
     { kind: 'decision', sessionId: 's2', selected: ['halt'], shadow: true, wouldInject: true, delivery: 'delivered', turn: 1, evidenceSeq: 1, responseSeq: 0, deliveryEvidenceSeq: 1, deliveryResponseSeq: 0, assessments: { halt: { state: 'needed' } } },
+    { kind: 'decision', sessionId: 's2', selected: [], turn: 1, evidenceSeq: 3, responseSeq: 1, assessments: { halt: { state: 'needed', confidence: 0.9 } } },
     { kind: 'decision', sessionId: 's2', selected: ['halt'], shadow: true, wouldInject: true, delivery: 'delivered', turn: 2, evidenceSeq: 5, responseSeq: 2, deliveryEvidenceSeq: 5, deliveryResponseSeq: 2, assessments: { halt: { state: 'needed' } } },
     { kind: 'decision', sessionId: 's3', selected: [], assessments: { halt: { state: 'satisfied' } } },
     // A pre-delivery judgment (responseSeq not advanced) stays pending.
     { kind: 'decision', sessionId: 's4', selected: ['verify'], injected: true, delivery: 'delivered', turn: 1, evidenceSeq: 2, responseSeq: 0, deliveryEvidenceSeq: 2, deliveryResponseSeq: 0, assessments: { verify: { state: 'needed' } } },
     { kind: 'decision', sessionId: 's4', selected: [], assessments: { verify: { state: 'addressing' } }, turn: 1, evidenceSeq: 3, responseSeq: 0 },
   ])
-  assert.deepEqual(totals.followUp.live, { resolved: 1, persisting: 0 })
-  // Attribution outcomes live on the totals, outside the live/shadow A/B rates.
-  // s1's post-delivery `unknown` judgment lands in its own bucket; s4's later
-  // `addressing` settles as resolved because new evidence arrived after delivery;
-  // s2's second delivery supersedes the first and stays pending.
-  assert.equal(totals.followUp.pending, 1)
-  assert.equal(totals.followUp.unknown, 1)
+  assert.deepEqual(totals.followUp.live, { resolved: 1, persisting: 0, addressing: 0, inapplicable: 0 })
+  // Evidence without a model response cannot settle s1 or s4. The second
+  // shadow delivery is also pending; only a valid same-turn response settles.
+  assert.equal(totals.followUp.pending, 2)
+  assert.equal(totals.followUp.unknown, 0)
   assert.equal(totals.followUp.expired, 0)
   assert.equal(totals.followUp.legacy, 0)
-  assert.deepEqual(totals.followUp.shadow, { resolved: 0, persisting: 1 })
-  assert.deepEqual(totals.cards.verify.followUp.live, { resolved: 1, persisting: 0 })
+  assert.deepEqual(totals.followUp.shadow, { resolved: 0, persisting: 1, addressing: 0, inapplicable: 0 })
+  assert.deepEqual(totals.cards.verify.followUp.live, { resolved: 1, persisting: 0, addressing: 0, inapplicable: 0 })
   assert.equal(totals.shadow, 2)
   assert.equal(totals.wouldInject, 2)
   // s1's and s4's injected deliveries both land in `live`.
@@ -477,7 +480,7 @@ test('dashboard payload and routes serve HTML/CSS/JSON', async () => {
   }
   const ctx = { inject(_deps, cb) { cb(webCtx) }, get() { return undefined } }
   registerDashboard(ctx, state)
-  assert.deepEqual(routes.map((route) => route.path).sort(), ['/eng-protocol', '/eng-protocol-bootstrap', '/eng-protocol/api/compile', '/eng-protocol/api/decisions', '/eng-protocol/api/models', '/eng-protocol/api/rebuild', '/eng-protocol/api/settings', '/eng-protocol/api/stats', '/eng-protocol/dashboard.css'], 'the debug route needs debug: true')
+  assert.deepEqual(routes.map((route) => route.path).sort(), ['/eng-protocol', '/eng-protocol-bootstrap', '/eng-protocol/api/compile', '/eng-protocol/api/decisions', '/eng-protocol/api/evidence', '/eng-protocol/api/models', '/eng-protocol/api/settings', '/eng-protocol/api/stats', '/eng-protocol/dashboard.css'], 'the debug route needs debug: true')
   const cssRoute = routes.find((route) => route.path === '/eng-protocol/dashboard.css')
   assert.ok(cssRoute)
   let css = ''
@@ -491,25 +494,26 @@ test('dashboard payload and routes serve HTML/CSS/JSON', async () => {
   assert.ok(html.includes('Eng Protocol'))
   assert.match(html, /'<li>' \+ esc\(r\) \+ '<\/li>'/, 'compiled rule text must be escaped')
 
-  // The rebuild endpoint only accepts the dashboard's own JSON requests and answers before compiling.
-  const rebuild = routes.find((route) => route.path === '/eng-protocol/api/rebuild')
-  const call = async (headers, body = '{}') => {
+  // The compile endpoint only accepts the dashboard's own JSON requests and answers before compiling.
+  const compile = routes.find((route) => route.path === '/eng-protocol/api/compile')
+  const call = async (headers, body = '{"action":"rebuild"}') => {
     const res = { statusCode: 0, headers: {}, setHeader(key, value) { this.headers[key] = value }, end(value) { this.body = value } }
     const req = { method: 'POST', headers, async *[Symbol.asyncIterator]() { yield Buffer.from(body) } }
-    await rebuild.handler(req, res)
+    await compile.handler(req, res)
     return res
   }
   assert.equal((await call({ host: '127.0.0.1:27480', origin: 'https://evil.example', 'content-type': 'application/json' })).statusCode, 403)
   assert.equal((await call({ host: '127.0.0.1:27480', origin: 'http://127.0.0.1:27480', 'content-type': 'text/plain' })).statusCode, 403)
   assert.equal((await call({ host: '127.0.0.1:27480', origin: 'http://127.0.0.1:27480', 'content-type': 'application/json' })).statusCode, 409, 'without a session identity the panel refuses to guess')
   state.agentBySession = new Map([['s1', { session: { id: 's1', header: { cwd: dir } }, options: {} }]])
-  state.compileRuns = new Map()
   state.compileAbort = new AbortController()
   state.projectConfigs = new Map()
-  const accepted = await call({ host: '127.0.0.1:27480', origin: 'http://127.0.0.1:27480', 'content-type': 'application/json' }, JSON.stringify({ sessionId: 's1' }))
+  const accepted = await call({ host: '127.0.0.1:27480', origin: 'http://127.0.0.1:27480', 'content-type': 'application/json' }, JSON.stringify({ sessionId: 's1', action: 'rebuild' }))
   assert.equal(accepted.statusCode, 202)
   assert.equal(JSON.parse(accepted.body).queued, true)
   assert.equal(JSON.parse(accepted.body).sessionId, 's1')
+  const unknown = await call({ host: '127.0.0.1:27480', origin: 'http://127.0.0.1:27480', 'content-type': 'application/json' }, JSON.stringify({ sessionId: 's1', action: 'cancel' }))
+  assert.equal(unknown.statusCode, 400)
 
   // A stats request for an unknown session is refused instead of falling back
   // to whichever project happened to be active last.

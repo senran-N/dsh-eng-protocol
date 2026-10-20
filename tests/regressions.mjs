@@ -9,12 +9,40 @@ import { normalizeConfig, saveUserSettings, DASHBOARD_EDITABLE } from '../lib/co
 import { compileSkill, normalizeCompiled } from '../lib/compiler.js'
 import { classifyTool, commandScope, hasUnmitigatedDestructiveCommand, SessionLedger } from '../lib/events.js'
 import { appendDecision, aggregate, readDecisions } from '../lib/store.js'
-import { AdaptiveRegistry } from '../lib/adaptive.js'
 
 const config = normalizeConfig({}, process.cwd())
-const skill = { name: 'demo', content: '# Scope\nUse this.\n## Verify\nRun the checks.', path: '/skills/demo/SKILL.md', hash: 'source' }
-const card = (id) => ({ id, title: id, when: 'editing code', triggers: ['edit'], rules: ['Check behavior'], satisfiedWhen: 'checks pass', sourceLines: [3, 4] })
-const raw = (cards, relations = []) => ({ entry: { when: 'code changes', notApplicable: 'docs only', points: ['p1', 'p2'] }, cards, relations })
+// Statements: [1] # Scope  [2] Use this.  [3] ## Verify  [4] Run the checks.
+const skill = { name: 'demo', content: '# Scope\nUse this.\n## Verify\nRun the checks.', path: '/skills/demo/SKILL.md' }
+
+test('changing error text does not hide repeated failures of the same operation', () => {
+  const ledger = new SessionLedger({ session: { deriveMessages: () => [] } })
+  for (let index = 1; index <= 2; index += 1) {
+    const callId = `f${index}`
+    ledger.push({ type: 'tool/call', data: { callId, name: 'pwsh', arguments: { command: 'node migrate.js' } } })
+    ledger.push({ type: 'tool/result', data: { message: { source: { callId }, isError: true, content: `Error: migration failed on attempt ${index}` } } })
+  }
+  const observed = ledger.observe([])
+  assert.ok(observed.triggers.includes('stuck'))
+  assert.equal(observed.ledger.failureStreak, 2)
+  assert.equal(observed.ledger.failures.length, 2)
+})
+
+test('failed background commands contribute recovery evidence even when they are not checks', () => {
+  const ledger = new SessionLedger({ session: { deriveMessages: () => [] } })
+  for (let index = 1; index <= 2; index += 1) {
+    const callId = `b${index}`
+    ledger.push({ type: 'tool/call', data: { callId, name: 'bash', arguments: { command: 'node migrate.js' } } })
+    ledger.push({ type: 'tool/result', data: { message: { source: { callId }, content: `started background job bash-${index}` } } })
+    ledger.observe([])
+    ledger.push({ type: 'user/message', data: { source: { kind: 'tool-jobs' }, content: `background job bash-${index} finished [status: completed, exit code: 1].` } })
+    const observed = ledger.observe([])
+    assert.ok(observed.triggers.includes('failed'))
+    assert.equal(observed.ledger.failures.length, index)
+    assert.equal(observed.ledger.failureStreak, index)
+    if (index === 2) assert.ok(observed.triggers.includes('stuck'))
+    assert.equal(ledger.settleJob(`bash-${index}`, '[status: failed]', new Set()), undefined, 'duplicate completion cannot inflate failures')
+  }
+})
 
 test('a mixed command keeps its halt preset despite an unrelated --version', () => {
   const mixed = 'git --version; git push origin main'
@@ -95,44 +123,40 @@ test('evidence keeps workdir/cwd so checks in another repo are distinguishable',
   assert.equal(inline.known, true)
 })
 
-test('a dependent is excluded when its prerequisite card is invalid', () => {
-  const graph = normalizeCompiled(raw([
-    { ...card('gate'), satisfiedWhen: '' },
-    card('dependent'),
-  ], [{ type: 'requires', source: 'gate', target: 'dependent' }]), skill, config)
+test('a dependent is excluded when its prerequisite has no source in the skill', () => {
+  const graph = normalizeCompiled({
+    cards: [
+      { id: 'gate', title: 'gate', quote: 'A sentence the skill never says.', triggers: ['edit'] },
+      { id: 'dependent', title: 'dependent', s: [4, 4], triggers: ['edit'] },
+    ],
+    relations: [{ type: 'requires', source: 'gate', target: 'dependent' }],
+  }, skill)
   assert.ok(!graph.cards.some((c) => c.id.endsWith('dependent')), 'dependent must not survive ungated')
-  assert.ok(graph.diagnostics.some((d) => d.code === 'dependency-excluded'))
-  assert.ok(graph.omissions.some((o) => o.reason === 'gate-invalid'))
+  assert.ok(graph.diagnostics.some((d) => d.code === 'dependency-excluded' && d.reason === 'gate-invalid'))
+  assert.equal(graph.coverage.dropped, 2)
 })
 
-test('a multi-part skill reports total extracted cards, not just part one', async () => {
-  const splitConfig = normalizeConfig({}, process.cwd())
-  const control = new AdaptiveRegistry().for('compiler', { provider: 'mock', model: 'mock' })
-  const long = `# Head\n${'x'.repeat(2500)}\n## Tail\nend`
+test('a multi-part skill counts every part, and one obligation quoted by two parts is kept once', async () => {
+  const filler = (letter) => `${letter.repeat(60)}.\n`.repeat(40)
+  const long = `# Head\n## One\n${filler('x')}Always run the checks.\nKeep notes in one.\n## Two\n${filler('y')}Always run the checks.\nKeep notes in two.`
   const llm = {
-    async prepareCall() {
+    async prepareCall(callConfig) {
       return {
-        config: {}, async *stream() {
-          yield {
-            type: 'text-delta',
-            text: JSON.stringify({
-              entry: { when: 'w', notApplicable: 'n', points: ['p1', 'p2'] },
-              cards: ['c1', 'c2'].map((id) => ({ id, title: id, when: 'x', triggers: ['edit'], satisfiedWhen: 'y', rules: ['do'], sourceLines: [1, 2] })),
-              relations: [],
-            }),
-          }
+        config: callConfig, async *stream({ messages }) {
+          const prompt = messages[0].content[0].text
+          const numbers = [...prompt.matchAll(/^\[(\d+)\] (Always run the checks\.|Keep notes in \w+\.)$/gm)].map((match) => Number(match[1]))
+          const lines = numbers.map((n, index) => JSON.stringify({ id: `c${index}`, s: [n, n], title: `c${index}`, on: ['edit'] }))
+          yield { type: 'text-delta', text: [...lines, '{"end":true}'].join('\n') }
           yield { type: 'finish', reason: { kind: 'stop' } }
         },
       }
     },
   }
-  const graph = await compileSkill(llm, { provider: 'mock', model: 'mock' }, { name: 'long', content: long, path: '/s/SKILL.md', hash: 'h' }, splitConfig, undefined, { control, partChars: 1500 })
-  assert.ok(graph.coverage.parts > 1, 'the fixture must actually split into parts')
-  assert.equal(graph.extractedCards, graph.coverage.extractedCards, 'top-level count must match the coverage total')
-  assert.ok(graph.extractedCards > 2, 'every segment contributes its extracted cards')
-  // The same obligation extracted by every part is kept once.
-  assert.equal(graph.cards.length, 2)
-  assert.equal(graph.coverage.duplicates, graph.extractedCards - 2)
+  const graph = await compileSkill(llm, { provider: 'mock', model: 'mock' }, { name: 'long', content: long, path: '/s/SKILL.md' }, config)
+  assert.equal(graph.coverage.parts, 2, 'the fixture must actually split into parts')
+  assert.equal(graph.coverage.extracted, 4, 'every part contributes what it extracted')
+  assert.deepEqual(graph.cards.map((card) => card.quote), ['Always run the checks.', 'Keep notes in one.', 'Keep notes in two.'])
+  assert.equal(graph.coverage.duplicates, 1)
 })
 
 test('runtime settings are written as top-level keys, not a runtime section', async () => {
@@ -204,6 +228,14 @@ test('a settings save is visible on the next read, not silently reverted', async
     const written = JSON.parse(await readFile(join(home, 'eng-protocol.json'), 'utf8'))
     assert.equal(written.cooldownSteps, 5)
     assert.equal(written.decision.timeoutMs, 9000)
+    const reset = await call('POST', JSON.stringify({ sessionId: 's1', settings: { runtime: { cooldownSteps: null }, decision: { timeoutMs: null } } }))
+    assert.equal(reset.statusCode, 200, reset.body)
+    const defaults = JSON.parse((await call('GET')).body)
+    assert.equal(defaults.effective.runtime.cooldownSteps, 3)
+    assert.equal(defaults.effective.decision.timeoutMs, 15000)
+    state.profileConfig = { stateDir: join(home, 'state'), decision: { timeoutMs: 12000 } }
+    await call('POST', JSON.stringify({ sessionId: 's1', settings: { decision: { timeoutMs: 9000 } } }))
+    assert.equal(state.config.decision.timeoutMs, 12000, 'profile precedence matches a fresh plugin instance')
   } finally {
     if (previous === undefined) delete process.env.DSH_HOME
     else process.env.DSH_HOME = previous
@@ -269,7 +301,7 @@ test('sessionId filters before limit so one session cannot crowd out another', a
   await rm(dir, { recursive: true, force: true })
 })
 
-test('follow-up requires evidence progress or a post-delivery judgment', () => {
+test('follow-up requires evidence and model response progress after delivery', () => {
   const delivered = { kind: 'decision', sessionId: 's', cwd: 'd', injected: true, delivery: 'delivered', turn: 1, evidenceSeq: 2, responseSeq: 0, deliveryEvidenceSeq: 2, deliveryResponseSeq: 0, deliveredAt: '2026-01-01T00:00:02Z', selected: ['x'], assessments: { x: { state: 'needed', confidence: 0.9 } } }
   // The original defect: a pre-delivery judgment counted as persisting.
   const preDelivery = aggregate([
@@ -280,7 +312,7 @@ test('follow-up requires evidence progress or a post-delivery judgment', () => {
   // A post-delivery judgment settles normally.
   const postDelivery = aggregate([
     delivered,
-    { ...delivered, injected: false, selected: [], judgedAt: '2026-01-01T00:00:03Z', evidenceSeq: 3, deliveryEvidenceSeq: 2, deliveryResponseSeq: 0, assessments: { x: { state: 'needed', confidence: 0.9 } } },
+    { ...delivered, injected: false, selected: [], judgedAt: '2026-01-01T00:00:03Z', evidenceSeq: 3, responseSeq: 1, deliveryEvidenceSeq: 2, deliveryResponseSeq: 0, assessments: { x: { state: 'needed', confidence: 0.9 } } },
   ])
   assert.equal(postDelivery.followUp.live.persisting, 1)
 })

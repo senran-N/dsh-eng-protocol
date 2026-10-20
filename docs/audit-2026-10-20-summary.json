@@ -1,0 +1,123 @@
+{
+  "capturedAt": "2026-10-20T14:21:06.732Z",
+  "logFiles": [
+    {
+      "file": "decisions.jsonl.1",
+      "parsed": 1955,
+      "invalid": 0
+    },
+    {
+      "file": "decisions.jsonl",
+      "parsed": 137,
+      "invalid": 0
+    }
+  ],
+  "errors": [],
+  "sessions": {
+    "files": 54,
+    "events": 26171,
+    "types": {
+      "tool/result": 4595,
+      "tool/call": 4472,
+      "step/start": 3482,
+      "step/end": 3481,
+      "assistant/message": 3463,
+      "job/registered": 1706,
+      "job/settled": 1705,
+      "session-log-deepseek/delivery-accepted": 783,
+      "user/message": 640,
+      "agent/inbox/spliced": 538,
+      "request/header": 128,
+      "compaction/prune": 124,
+      "turn/start": 116,
+      "turn/end": 115,
+      "sandbox/mode": 72,
+      "approval/policy": 72,
+      "permission/preset": 70,
+      "session/title": 63,
+      "system/message": 55,
+      "request/context": 49,
+      "assistant/attempt": 44,
+      "workspace/changes": 44,
+      "todo/write": 35,
+      "compaction/start": 33,
+      "compaction/summary": 33,
+      "compaction/end": 33,
+      "session/end-seed": 26,
+      "session/title-llm-request": 25,
+      "llm/retry": 25,
+      "llm/retry-started": 25,
+      "model/selection": 20,
+      "command/run": 18,
+      "command/done": 18,
+      "subagent/catalog": 17,
+      "subagent/descriptor": 17,
+      "goal/change": 11,
+      "deliverables/presented": 5,
+      "developer/message": 4,
+      "agent-preset/selected": 3,
+      "approval/asked": 2,
+      "approval/decided": 2,
+      "working-directory/change": 2
+    },
+    "skillLoads": {
+      "analyzing-binaries": 11,
+      "apk-reverse": 8,
+      "diagnose-windows-sandbox-acl": 2,
+      "redteam-setup": 2,
+      "reversing-flutter-apps": 1,
+      "android-reverse-engineering": 1,
+      "android-reverse-engineering-dynamic": 1,
+      "ghidra-ida-re": 1
+    },
+    "failedSkillLoads": 3,
+    "protocolNotices": 93,
+    "typedProtocolBlocks": 0,
+    "legacyProtocolErrorText": 35,
+    "surfaceReplacements": 167,
+    "backgroundNotices": 34,
+    "jobOutputResults": 79,
+    "successfulSkillLoads": 27
+  },
+  "decisions": {
+    "count": 1449,
+    "sessions": 23,
+    "firstAt": "2026-10-18T05:26:41.436Z",
+    "lastAt": "2026-10-20T14:20:07.476Z",
+    "blocked": 35,
+    "injected": 128,
+    "withErrors": 72,
+    "deadlineExpired": 53,
+    "boundaries": {
+      "tool": 1079,
+      "request": 320,
+      "settle": 50
+    },
+    "triggers": {
+      "edit": 433,
+      "read": 368,
+      "heartbeat": 269,
+      "failed": 173,
+      "checked": 81,
+      "turn": 80,
+      "check_start": 80,
+      "test_edit": 64,
+      "settle": 50,
+      "risky": 30,
+      "first_edit": 18,
+      "dependency": 11,
+      "untrusted": 9,
+      "stuck": 8,
+      "skill": 6,
+      "research": 1
+    },
+    "withCitations": 119,
+    "withRequestSizes": 0
+  },
+  "evidence": {
+    "referenced": 119,
+    "readable": 119,
+    "missingOrInvalid": 0,
+    "withRelations": 0
+  }
+}

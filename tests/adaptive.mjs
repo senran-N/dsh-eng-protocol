@@ -1,4 +1,5 @@
-// Adaptive control, resumable compilation and retry: no budgets, real recovery.
+/// Adaptive control and retry for auxiliary model calls: no budgets, real recovery.
+// Skill compilation has its own suite (compile.mjs).
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
@@ -7,11 +8,9 @@ import { join } from 'node:path'
 
 process.env.ENG_PROTOCOL_RETRY_BASE_MS = '1'
 const { AdaptiveLimiter, AdaptiveRegistry, AdaptiveSize, LatencyTracker, classifyError, sleep: waitFor, withRetry } = await import('../lib/adaptive.js')
-const { cancelCompile, compileSkill, compileStatusFor, graphFor, memoryParts, refreshSkills, settleCompiles, stopCompiles, wantSkill } = await import('../lib/compiler.js')
 const { decisionRoute, normalizeConfig, saveUserSettings } = await import('../lib/config.js')
 const { evaluateDecision, packBatches, planRounds } = await import('../lib/decide.js')
 const { BUILTIN_CARDS } = await import('../lib/cards.js')
-const { compileSummary } = await import('../lib/dashboard.js')
 
 const route = { provider: 'mock', model: 'mock' }
 const config = normalizeConfig({}, process.cwd())
@@ -38,32 +37,16 @@ function fakeLlm(reply) {
   }
 }
 
-/** A compile reply with `count` section cards for whatever part was sent. */
-function compiled(prompt, count = 2) {
-  const part = /PART: (\d+)/.exec(prompt)?.[1] ?? '1'
-  const [start, end] = (/body lines (\d+)–(\d+)/.exec(prompt) ?? [0, 1, 1]).slice(1).map(Number)
-  return JSON.stringify({
-    entry: { title: 'T', when: 'work', notApplicable: 'other work', points: ['p1', 'p2'] },
-    cards: Array.from({ length: count }, (_, index) => ({ id: `c${part}_${start}_${index}`, title: `c${index}`, when: 'x', triggers: ['edit'], satisfiedWhen: 'y', rules: ['do'], sourceLines: [start, end] })),
-    relations: [],
-  })
-}
-
-const bodyOf = (prompt) => prompt.split('<skill>\n')[1]?.split('\n</skill>')[0] ?? ''
-const longSkill = (marker = 'END') => ({
-  name: 'long', path: '/s/long/SKILL.md', hash: 'h',
-  content: ['# One', 'a'.repeat(1800), '## Two', 'b'.repeat(1800), '## Three', 'c'.repeat(1800), `## Four\n${marker}`].join('\n'),
-})
-
 test('errors are classified for retry and explained in plain language', () => {
   assert.equal(classifyError(Object.assign(new Error('slow down'), { status: 429, retryAfterMs: 2000 })).kind, 'rate-limit')
   assert.equal(classifyError(Object.assign(new Error('x'), { failure: { code: 'AUTH', message: 'bad key', status: 401 } })).kind, 'auth')
   assert.equal(classifyError(new DOMException('The operation was aborted due to timeout', 'TimeoutError')).kind, 'timeout')
+  assert.equal(classifyError(new DOMException('模型长时间没有输出', 'TimeoutError')).kind, 'timeout')
   assert.equal(classifyError(Object.assign(new Error('cut'), { code: 'MAX_TOKENS' })).kind, 'truncated')
   assert.equal(classifyError(new Error('400 Incorrect role information')).kind, 'role')
   assert.equal(classifyError(new Error('入口卡缺少 when')).kind, 'bad-output')
   assert.equal(classifyError(new Error('fetch failed: ECONNRESET')).kind, 'network')
-  for (const kind of ['auth', 'role', 'model', 'config']) assert.equal(classifyError(Object.assign(new Error('x'), { kind })).retryable, false)
+  for (const kind of ['auth', 'role', 'model', 'config', 'truncated']) assert.equal(classifyError(Object.assign(new Error('x'), { kind })).retryable, false)
   assert.match(classifyError(Object.assign(new Error('x'), { status: 401 })).hint, /API key/)
 })
 
@@ -104,6 +87,71 @@ test('the limiter is AIMD: halves on overload, grows back after successes, never
   assert.equal(limiter.snapshot().queued, 0, 'an aborted waiter leaves the queue')
 })
 
+test('waiters are served by priority, then in arrival order', async () => {
+  const limiter = new AdaptiveLimiter({ initial: 1, min: 1, max: 1 })
+  await limiter.acquire()
+  const order = []
+  const runs = [['low-1', 0], ['high', 2], ['low-2', 0], ['mid', 1]].map(([name, priority]) => limiter.run(() => order.push(name), undefined, priority))
+  limiter.release()
+  await Promise.all(runs)
+  assert.deepEqual(order, ['high', 'mid', 'low-1', 'low-2'])
+})
+
+test('slow start grows quickly only while work queues, then additively after congestion', async () => {
+  const limiter = new AdaptiveLimiter({ initial: 4, min: 1, max: 64, slowStart: true })
+  for (let index = 0; index < 40; index += 1) limiter.succeed()
+  assert.equal(limiter.capacity, 4, 'no queue means no reason to grow')
+  let active = 0, peak = 0
+  await Promise.all(Array.from({ length: 300 }, () => limiter.run(async () => {
+    active += 1; peak = Math.max(peak, active)
+    await sleep(4)
+    active -= 1
+    limiter.succeed()
+  })))
+  assert.ok(peak > 16, `a queue of work opened ${peak} slots`)
+  const grown = limiter.capacity
+  limiter.overload()
+  assert.equal(limiter.capacity, Math.max(1, Math.floor(grown / 2)))
+  const halved = limiter.capacity
+  await Promise.all(Array.from({ length: halved * 3 }, () => limiter.run(async () => { await sleep(2); limiter.succeed() })))
+  assert.ok(limiter.capacity > halved && limiter.capacity <= halved + 3, 'after congestion growth is additive')
+})
+
+test('one failing cohort reduces concurrency once; stale successes cannot undo it, and fresh failures reduce again', async () => {
+  const control = new AdaptiveRegistry().for('judge', route)
+  control.limiter.max = 32
+  control.limiter.limit = 16
+  const epoch = control.limiter.epoch
+  for (let i = 0; i < 16; i += 1) AdaptiveRegistry.observe(control, { epoch, error: Object.assign(new Error('busy'), { status: 429 }) })
+  assert.equal(control.limiter.capacity, 8)
+  for (let i = 0; i < 20; i += 1) AdaptiveRegistry.observe(control, { epoch, ms: 10 })
+  assert.equal(control.limiter.capacity, 8)
+  AdaptiveRegistry.observe(control, { epoch: control.limiter.epoch, error: new DOMException('slow', 'TimeoutError'), ms: 1000 })
+  assert.equal(control.limiter.capacity, 4)
+  await Promise.all(Array.from({ length: 12 }, () => control.limiter.run(async () => {
+    const current = control.limiter.epoch
+    await sleep(2)
+    AdaptiveRegistry.observe(control, { epoch: current, ms: 2 })
+  })))
+  assert.ok(control.limiter.capacity > 4 && control.limiter.capacity < 8, 'recovery is additive after congestion')
+})
+
+test('Retry-After pauses queued work and cancellation removes its waiter', async () => {
+  const limiter = new AdaptiveLimiter({ initial: 4 })
+  limiter.overload(80)
+  const controller = new AbortController()
+  let ran = false
+  const cancelled = limiter.run(() => { ran = true }, controller.signal)
+  controller.abort(new Error('cancelled'))
+  await assert.rejects(cancelled, /cancelled/)
+  assert.equal(ran, false)
+  const started = performance.now()
+  await limiter.run(() => { ran = true })
+  assert.ok(performance.now() - started >= 60)
+  assert.equal(ran, true)
+  assert.equal(limiter.snapshot().queued, 0)
+})
+
 test('timeouts follow observed latency below the hard ceiling', () => {
   const latency = new LatencyTracker()
   assert.equal(latency.timeout(15000), 15000, 'no samples: the ceiling applies')
@@ -112,215 +160,6 @@ test('timeouts follow observed latency below the hard ceiling', () => {
   assert.ok(adaptive >= 3000 && adaptive < 15000, `adaptive timeout ${adaptive}`)
   latency.record(40000)
   assert.equal(latency.timeout(15000), 15000, 'never above the ceiling')
-})
-
-test('a skill keeps every obligation: no card budget exists any more', async () => {
-  const llm = fakeLlm((prompt) => compiled(prompt, 40))
-  const graph = await compileSkill(llm, route, { name: 'big', content: '# Big\nmany rules', path: '/s/SKILL.md', hash: 'h' }, config)
-  assert.equal(graph.cards.length, 40)
-  assert.deepEqual(graph.omissions, [])
-  assert.ok(!graph.warnings.some((warning) => warning.includes('预算')))
-})
-
-test('output cut at the model cap splits the part, remembers the split, and never resends it whole', async () => {
-  const llm = fakeLlm((prompt) => bodyOf(prompt).length > 3000
-    ? { text: '{"cards":[{"id":"x"', finish: 'max-tokens' }
-    : compiled(prompt))
-  const skill = longSkill()
-  const parts = memoryParts()
-  const graph = await compileSkill(llm, route, skill, config, undefined, { parts })
-  assert.ok(graph.coverage.splits >= 1, 'the oversized part was halved')
-  const accepted = llm.prompts.map((item) => bodyOf(item.prompt)).filter((body) => body.length <= 3000)
-  assert.equal(accepted.reduce((sum, body) => sum + body.length, 0), skill.content.length, 'every character still reaches the compiler')
-  assert.ok(accepted.every((body) => skill.content.includes(body)))
-  const again = fakeLlm(() => { throw new Error('no model call expected') })
-  const resumed = await compileSkill(again, route, skill, config, undefined, { parts })
-  assert.equal(again.prompts.length, 0, 'the split and both halves resume from their checkpoints')
-  assert.equal(resumed.cards.length, graph.cards.length)
-})
-
-test('transient compile failures are retried with progress reported', async () => {
-  const llm = fakeLlm((prompt, index) => {
-    if (index === 0) throw Object.assign(new Error('rate limited'), { status: 429 })
-    if (index === 1) return 'not json at all'
-    return compiled(prompt)
-  })
-  const phases = []
-  const graph = await compileSkill(llm, route, { name: 'flaky', content: '# A\nbody', path: '/s/SKILL.md', hash: 'h' }, config, undefined, { onProgress: (progress) => phases.push(progress.phase) })
-  assert.equal(graph.cards.length, 2)
-  assert.equal(llm.prompts.length, 3)
-  assert.equal(phases.filter((phase) => phase === 'retrying').length, 2)
-})
-
-test('an interrupted multi-part compile resumes from its checkpoint', async () => {
-  const parts = memoryParts()
-  const skill = longSkill()
-  const failing = fakeLlm((prompt) => {
-    if (bodyOf(prompt).includes('END')) throw Object.assign(new Error('bad key'), { status: 401 })
-    return compiled(prompt)
-  })
-  await assert.rejects(compileSkill(failing, route, skill, config, undefined, { parts, partChars: 2000 }), /bad key/)
-  const saved = parts.parts.size
-  assert.ok(saved >= 2, 'finished parts were checkpointed before the failure')
-  const healthy = fakeLlm((prompt) => compiled(prompt))
-  const graph = await compileSkill(healthy, route, skill, config, undefined, { parts, partChars: 2000 })
-  assert.equal(healthy.prompts.length, 1, 'only the failed part is sent again')
-  assert.match(bodyOf(healthy.prompts[0].prompt), /END/)
-  assert.equal(graph.coverage.resumedParts, saved)
-})
-
-test('editing the end of a skill recompiles only the changed part', async () => {
-  const parts = memoryParts()
-  const first = fakeLlm((prompt) => compiled(prompt))
-  await compileSkill(first, route, longSkill('END'), config, undefined, { parts, partChars: 2000 })
-  const second = fakeLlm((prompt) => compiled(prompt))
-  const graph = await compileSkill(second, route, longSkill('CHANGED'), config, undefined, { parts, partChars: 2000 })
-  assert.equal(second.prompts.length, 1)
-  assert.match(bodyOf(second.prompts[0].prompt), /CHANGED/)
-  assert.ok(graph.coverage.resumedParts >= 2)
-})
-
-/** A minimal state + ctx around refreshSkills, with a state directory of its own. */
-async function project({ reply, skills = ['alpha', 'beta'], content = (name) => `# ${name}\nbody` }) {
-  const root = await mkdtemp(join(tmpdir(), 'eng-adaptive-'))
-  const cfg = normalizeConfig({ stateDir: join(root, 'state') }, root)
-  const llm = fakeLlm(reply)
-  const host = { skills, content }
-  const ctx = {
-    logger: { warn() {}, info() {} },
-    get: (name) => name === 'llm' ? llm : {
-      async list() { return host.skills.map((name) => ({ name, description: name, path: `/s/${name}/SKILL.md` })) },
-      async get(name) { return { name, description: name, path: `/s/${name}/SKILL.md`, content: host.content(name) } },
-    },
-  }
-  const state = { config: cfg, graphs: new Map(), compileAbort: new AbortController() }
-  const agent = { options: route, session: { id: 's', header: { cwd: root } } }
-  const status = (who = agent) => compileStatusFor(state, who, root)
-  const done = async () => {
-    stopCompiles(state)
-    await rm(root, { recursive: true, force: true })
-  }
-  return { root, cfg, llm, host, ctx, state, agent, status, done }
-}
-
-const upstream502 = () => { throw Object.assign(new Error('upstream 502'), { status: 502 }) }
-const badKey = () => { throw Object.assign(new Error('bad key'), { status: 401 }) }
-
-test('reading a catalog compiles nothing; a skill compiles once the agent uses it', async () => {
-  const env = await project({ reply: (prompt) => compiled(prompt) })
-  try {
-    const graph = await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
-    assert.equal(env.llm.prompts.length, 0, 'no model call for skills nobody loaded')
-    assert.deepEqual(graph.graphs.map((skill) => [skill.name, skill.compiled, skill.cards.length]), [['alpha', false, 0], ['beta', false, 0]])
-    assert.ok(graph.graphs.every((skill) => skill.entry.entry), 'entry cards come from the catalog alone')
-    assert.equal(env.status().skills.alpha.state, 'standby')
-    assert.match(compileSummary(env.status()), /用到时再准备/)
-    await wantSkill(env.ctx, env.state, env.agent, 'alpha')
-    await settleCompiles(env.state, env.agent)
-    assert.equal(env.llm.prompts.length, 1)
-    assert.equal(env.status().skills.alpha.state, 'done')
-    assert.equal(env.status().skills.beta.state, 'standby')
-  } finally { await env.done() }
-})
-
-test('a failed skill keeps a hint, schedules a retry, and a retry compiles only it', async () => {
-  let broken = true
-  const env = await project({ reply: (prompt) => (broken && prompt.includes('SKILL NAME: beta') ? upstream502() : compiled(prompt)) })
-  try {
-    for (const name of ['alpha', 'beta']) void wantSkill(env.ctx, env.state, env.agent, name)
-    await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
-    const entry = env.status().skills.beta
-    assert.equal(entry.state, 'failed')
-    assert.equal(entry.kind, 'server')
-    assert.match(entry.hint, /自动再试/)
-    assert.ok(Date.parse(entry.nextRetryAt) > Date.now(), 'a background retry is scheduled')
-    assert.equal(entry.attempts, 4, 'transient failures were retried before giving up')
-    assert.match(compileSummary(env.status()), /1 个 skill 没准备好，其余 1 个正常，.* 会自动再试/)
-    broken = false
-    const before = env.llm.prompts.length
-    const graph = await refreshSkills(env.ctx, env.state, env.agent, { queue: true, wait: true })
-    assert.equal(env.llm.prompts.length - before, 1, 'the compiled skill is not compiled again')
-    assert.equal(graph.graphs.filter((skill) => skill.compiled).length, 2)
-    assert.equal(env.status().skills.beta.state, 'done')
-    assert.equal(env.status().retryAt, undefined, 'the failure record is cleared on success')
-  } finally { await env.done() }
-})
-
-test('a changed skill that fails to recompile keeps guarding with its last good graph', async () => {
-  let fail = false
-  const env = await project({ skills: ['alpha'], reply: (prompt) => (fail ? badKey() : compiled(prompt)) })
-  try {
-    void wantSkill(env.ctx, env.state, env.agent, 'alpha')
-    await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
-    fail = true
-    env.host.content = () => '# alpha\nchanged body'
-    const graph = await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
-    assert.equal(graph.graphs.length, 1)
-    assert.equal(graph.graphs[0].stale, true)
-    assert.ok(graph.graphs[0].cards.length > 0, 'the last good obligations keep guarding')
-    assert.equal(env.status().skills.alpha.state, 'failed')
-    assert.equal(env.status().skills.alpha.stale, true)
-    assert.equal(env.status().skills.alpha.nextRetryAt, undefined, 'a permanent failure does not auto-retry')
-    // Another session starting now finds the last good compile on disk as well.
-    const other = { options: route, session: { id: 's2', header: { cwd: env.root } } }
-    assert.equal((await refreshSkills(env.ctx, env.state, other)).graphs[0].stale, true)
-  } finally { await env.done() }
-})
-
-test('cancel stops a compile and keeps finished parts for the next run', async () => {
-  let release
-  const gate = new Promise((resolve) => { release = resolve })
-  const env = await project({ skills: ['alpha', 'beta'], reply: async (prompt) => { if (prompt.includes('SKILL NAME: beta')) await gate; return compiled(prompt) } })
-  try {
-    for (const name of ['alpha', 'beta']) void wantSkill(env.ctx, env.state, env.agent, name)
-    await refreshSkills(env.ctx, env.state, env.agent)
-    await sleep(30)
-    assert.equal(cancelCompile(env.state, env.agent), true)
-    release()
-    await settleCompiles(env.state, env.agent)
-    assert.equal(env.status().cancelled, true)
-    assert.equal(env.status().skills.beta.state, 'cancelled')
-    assert.equal(env.status().skills.alpha.state, 'done')
-    const before = env.llm.prompts.length
-    await refreshSkills(env.ctx, env.state, env.agent, { wait: true })
-    assert.equal(env.llm.prompts.length, before, 'a paused skill stays paused across a refresh')
-    await refreshSkills(env.ctx, env.state, env.agent, { queue: true, wait: true })
-    assert.equal(env.llm.prompts.length - before, 1, 'retry resumes only the paused skill')
-    assert.equal(env.status().skills.beta.state, 'done')
-  } finally { await env.done() }
-})
-
-test('compiles are shared by content: two agents wait on one run, other projects reuse it, no scope can delete it', async () => {
-  let release
-  const gate = new Promise((resolve) => { release = resolve })
-  const env = await project({ skills: ['alpha'], reply: async (prompt) => { await gate; return compiled(prompt) } })
-  const elsewhere = await mkdtemp(join(tmpdir(), 'eng-elsewhere-'))
-  try {
-    // A session and its subagent load the same skill at the same time.
-    const subagent = { options: route, session: { id: 'sub', header: { cwd: env.root } } }
-    for (const agent of [env.agent, subagent]) void wantSkill(env.ctx, env.state, agent, 'alpha')
-    await Promise.all([refreshSkills(env.ctx, env.state, env.agent), refreshSkills(env.ctx, env.state, subagent)])
-    await sleep(20)
-    release()
-    await Promise.all([settleCompiles(env.state, env.agent), settleCompiles(env.state, subagent)])
-    assert.equal(env.llm.prompts.length, 1, 'one model run for both agents')
-    assert.ok(graphFor(env.state, env.root, subagent).graphs[0].compiled)
-    // A user-level skill opened from another project is not compiled again.
-    const visitor = { options: route, session: { id: 'v', header: { cwd: elsewhere } } }
-    void wantSkill(env.ctx, env.state, visitor, 'alpha')
-    assert.ok((await refreshSkills(env.ctx, env.state, visitor, { wait: true })).graphs[0].compiled)
-    assert.equal(env.llm.prompts.length, 1, 'no recompile per project')
-    // An agent whose scope lists other skills leaves everyone else's compiles alone.
-    env.host.skills = ['beta']
-    await refreshSkills(env.ctx, env.state, visitor, { wait: true })
-    env.host.skills = ['alpha']
-    const late = { options: route, session: { id: 'late', header: { cwd: env.root } } }
-    assert.ok((await refreshSkills(env.ctx, env.state, late)).graphs[0].compiled, 'still stored')
-    assert.equal(env.llm.prompts.length, 1)
-  } finally {
-    await rm(elsewhere, { recursive: true, force: true })
-    await env.done()
-  }
 })
 
 test('the judge splits a candidate set whose answer would not fit, and judges every card', async () => {
@@ -355,6 +194,61 @@ const decide = (llm, state, cards, snapshot = {}) => evaluateDecision({ get: () 
   boundary: 'tool', triggers: ['edit'], candidates: cards, graph: { cards, relations: [], revision: 'r' }, ledger: {}, ...snapshot,
 })
 
+test('malformed judge assessments stay unknown and visible rather than acquiring default confidence', async () => {
+  const card = ruleCard('missing_confidence')
+  const llm = fakeLlm(() => JSON.stringify({ cards: [{ id: card.id, state: 'needed' }] }))
+  const result = await decide(llm, judgeState(), [card])
+  assert.equal(llm.prompts.length, 2, 'one targeted repair is allowed, never an unbounded retry')
+  assert.equal(result.cards.length, 0)
+  assert.equal(result.record.assessments[card.id].state, 'unknown')
+  assert.equal(result.record.assessments[card.id].confidence, 0)
+  assert.match(result.record.error, /判断缺失或格式无效/)
+})
+
+test('an oversized judge input reports context-limit without retrying or selecting a fabricated answer', async () => {
+  const card = ruleCard('long_context')
+  const llm = fakeLlm(() => { throw Object.assign(new Error('maximum context length exceeded'), { code: 'context_length_exceeded', status: 400 }) })
+  const result = await decide(llm, judgeState(), [card])
+  assert.equal(llm.prompts.length, 1)
+  assert.equal(result.cards.length, 0)
+  assert.equal(result.record.errorKind, 'context-limit')
+  assert.match(result.record.error, /context length/)
+  assert.equal(result.record.assessments[card.id].state, 'unknown')
+  assert.equal(result.record.assessments[card.id].confidence, 0)
+})
+
+test('borderline skill routing is reviewed without weakening the configured confidence threshold', async () => {
+  const entry = ruleCard('skill_client_entry', { skill: 'client', entry: true })
+  const llm = fakeLlm((prompt, index) => {
+    if (index > 0) assert.match(prompt, /REVIEW OF A POSSIBLY MISSED SKILL REMINDER/)
+    return answer(idsOf(prompt), () => ({ state: 'needed', confidence: index === 0 ? 0.55 : 0.85 }))
+  })
+  const result = await decide(llm, judgeState(), [entry])
+  assert.equal(llm.prompts.length, 2)
+  assert.deepEqual(result.record.reviewed, [entry.id])
+  assert.deepEqual(result.cards.map((card) => card.id), [entry.id])
+  const uncertain = fakeLlm((prompt) => answer(idsOf(prompt), () => ({ state: 'needed', confidence: 0.55 })))
+  assert.equal((await decide(uncertain, judgeState(), [entry])).cards.length, 0, 'unresolved uncertainty still does not inject')
+})
+
+test('delivery addressing is reviewed as stopping now; a failed review keeps the original verdict', async () => {
+  const card = ruleCard('skill_report_complete', { skill: 'report' })
+  const llm = fakeLlm((prompt, index) => {
+    assert.match(prompt, /"stopping": true/)
+    return answer(idsOf(prompt), () => ({ state: index === 0 ? 'addressing' : 'needed', confidence: 0.9 }))
+  })
+  const result = await decide(llm, judgeState(), [card], { boundary: 'settle', triggers: ['settle'] })
+  assert.deepEqual(result.cards.map((card) => card.id), [card.id])
+  const failed = fakeLlm((prompt, index) => {
+    if (index > 0) throw Object.assign(new Error('bad key'), { status: 401 })
+    return answer(idsOf(prompt), () => ({ state: 'addressing', confidence: 0.7 }))
+  })
+  const kept = await decide(failed, judgeState(), [card], { boundary: 'settle', triggers: ['settle'] })
+  assert.equal(kept.assessments[card.id].state, 'addressing')
+  assert.equal(kept.cards.length, 0)
+  assert.match(kept.record.error, /skill 复核没完成/)
+})
+
 test('the batch size grows only after full batches answered whole', async () => {
   const llm = fakeLlm((prompt) => answer(idsOf(prompt)))
   const state = judgeState()
@@ -374,7 +268,7 @@ test('batches failing at the same size shrink it once; a smaller size failing ha
   assert.equal(size.current, 6)
 })
 
-test('a time limit keeps the batches that answered, and a batch too slow for it shrinks the next ones', async () => {
+test('a shared time limit keeps answered batches without training smaller batches or provider congestion', async () => {
   const llm = fakeLlm(async (prompt, index, callConfig, signal) => {
     const ids = idsOf(prompt)
     // The full batch never answers in time; the small one answers at once.
@@ -388,7 +282,8 @@ test('a time limit keeps the batches that answered, and a batch too slow for it 
   assert.match(result.record.error, /一部分规则没在时限内检查完/)
   assert.deepEqual(result.cards.map((card) => card.id), ['card_29'], 'the batch that answered in time still delivers')
   assert.deepEqual(result.assessments.card_0, { state: 'unknown', confidence: 0, reason: '这条没在时限内检查完' })
-  assert.equal(judgeControl(state).size.current, 12, 'the next judgment sends smaller batches')
+  assert.equal(judgeControl(state).size.current, 24, 'a shared budget is not evidence of insufficient card capacity')
+  assert.equal(judgeControl(state).limiter.epoch, 0, 'our own deadline must not train provider congestion')
 })
 
 test('a batch cut off while it waited for a slot does not shrink the size', async () => {

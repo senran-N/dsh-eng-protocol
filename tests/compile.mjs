@@ -200,9 +200,17 @@ test('a call that goes silent is cut off; a call that keeps streaming never is',
     await new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }))
   } } } }
   const started = performance.now()
-  await assert.rejects(streamModel(stalled, route, { prompt: 'x', timeoutMs: 5000, firstChunkTimeoutMs: 200, idleTimeoutMs: 100 }),
-    (error) => error.name === 'TimeoutError' && /没有输出/.test(error.message))
-  assert.ok(performance.now() - started < 1500)
+  // The production silence watchdog is deliberately unref'ed so an abandoned
+  // background request cannot keep Node alive. Keep this test process alive
+  // while verifying that the watchdog itself aborts the stalled stream.
+  const keepAlive = setTimeout(() => {}, 2000)
+  try {
+    await assert.rejects(streamModel(stalled, route, { prompt: 'x', timeoutMs: 5000, firstChunkTimeoutMs: 200, idleTimeoutMs: 100 }),
+      (error) => error.name === 'TimeoutError' && /没有输出/.test(error.message))
+    assert.ok(performance.now() - started < 1500)
+  } finally {
+    clearTimeout(keepAlive)
+  }
 })
 
 // ---- one skill ------------------------------------------------------------------

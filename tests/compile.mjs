@@ -1,12 +1,18 @@
 // Skill compilation: numbered statements, streamed answers, parts shared by
 // text, one queue with priorities, background recovery and plain-language status.
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.ENG_PROTOCOL_RETRY_BASE_MS = '1'
+// Several production retry/backoff timers are intentionally unref'ed so they
+// do not keep an otherwise idle host alive. The fake-host tests below await
+// that background work without a real DSH host handle, so keep this test file
+// alive while it runs; the after hook always clears the safety timeout.
+const testProcessKeepAlive = setTimeout(() => {}, 60_000)
+after(() => clearTimeout(testProcessKeepAlive))
 const { CompileJobs, PRIORITY } = await import('../lib/compile-jobs.js')
 const { partKey, skillIdentity, skillKey } = await import('../lib/compile-jobs.js')
 const { compileSkill, compileStatusFor, forgetAgent, graphFor, memoryStore, prepareAllSkills, prepareSkill, refreshSkills, settleCompiles, stopCompiles, wantSkill } = await import('../lib/compiler.js')

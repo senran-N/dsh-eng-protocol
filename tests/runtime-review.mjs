@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,6 +11,12 @@ import { Aftermath } from '../lib/aftermath.js'
 import { BLOCK_INFO } from '../lib/intervention.js'
 import { appendDecision, loadEvidence, readDecisions } from '../lib/store.js'
 import { decisionsPayload, registerDashboard } from '../lib/dashboard.js'
+
+// Production retry timers are intentionally unref'ed. Keep this isolated
+// test process alive while assertions await a retry that has no other handles;
+// always release the safety handle when the test suite finishes.
+const testProcessKeepAlive = setTimeout(() => {}, 60_000)
+after(() => clearTimeout(testProcessKeepAlive))
 
 const route = { provider: 'mock', model: 'mock' }
 const agent = { options: route, session: { id: 's', header: { cwd: 'C:/project' } } }

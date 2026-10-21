@@ -163,9 +163,11 @@ test('fast small judgments cannot shorten the deadline learned for a much larger
   assert.equal(large.record.deadlineMs, 10000)
 })
 
-test('a stalled model request retries within the original deadline and reduces route pressure', async () => {
+test('a calibrated stalled request retries within the deadline without treating our retry timer as provider congestion', async () => {
   const state = stateOf(4500)
   const control = state.adaptive.for('judge', decisionRoute(agent, state.config))
+  for (let i = 0; i < 4; i++) await decide(fakeLlm(prompt => answer(prompt)), state, [card('x')])
+  for (const latency of control.judgmentLatency.values()) latency.samples = [600, 600, 600, 1400]
   const llm = fakeLlm(async (prompt, signal, number) => {
     if (number === 1) await delay(10000, signal)
     return answer(prompt)
@@ -178,7 +180,7 @@ test('a stalled model request retries within the original deadline and reduces r
   assert.equal(result.record.attempts[0].errorKind, 'timeout')
   assert.equal(result.record.attempts[1].status, 'answered')
   assert.ok(result.record.latencyMs < 4500)
-  assert.ok(control.limiter.capacity < 4)
+  assert.equal(control.limiter.epoch, 0, 'a local retry cutoff is not a provider congestion response')
   assert.equal(control.limiter.snapshot().active, 0)
 })
 

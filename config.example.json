@@ -3,6 +3,7 @@
   "shadow": false,
   "minConfidence": 0.6,
   "cooldownSteps": 3,
+  "maxRemindersPerStep": null,
   "heartbeatSteps": 8,
   "builtinCards": true,
   "skills": {
@@ -30,13 +31,12 @@
     "enabled": true,
     "cards": [
       "halt",
-      "scope",
       "anti_reward_hacking",
       "no_cheat",
       "trust_boundary",
       "refuted_premise"
     ],
-    "skillCheckpoints": true
+    "skillCheckpoints": false
   },
   "dashboard": {
     "enabled": true,

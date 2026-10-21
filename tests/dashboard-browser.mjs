@@ -149,14 +149,17 @@ try {
   assert.match(await evaluate("document.getElementById('settings-body').textContent"), /检查用的模型/)
   assert.ok(await evaluate("document.getElementById('set-decision-model') !== null"), 'the judge model is editable')
   assert.equal(await evaluate("document.getElementById('set-enforcement-enabled')"), null, 'enforcement switches stay out of the browser')
+  assert.equal(await evaluate("document.getElementById('set-runtime-maxRemindersPerStep').value"), '')
   await evaluate(`(async () => {
     document.getElementById('set-decision-provider').value = 'mock-provider';
     document.getElementById('set-decision-model').value = 'mock-model';
+    document.getElementById('set-runtime-maxRemindersPerStep').value = '2';
     document.getElementById('settings-save').click();
   })()`)
   await until(async () => await evaluate("(document.getElementById('settings-body') || {}).textContent?.includes('mock-provider/mock-model') || (document.getElementById('banner') || {}).textContent?.includes('已保存')"), 'settings were not saved')
   const saved = JSON.parse(await readFile(join(root, 'eng-protocol.json'), 'utf8').catch(() => '{}'))
   assert.deepEqual([saved.decision?.provider, saved.decision?.model], ['mock-provider', 'mock-model'])
+  assert.equal(saved.maxRemindersPerStep, 2, 'the reminder budget persists through the real settings route')
   // The saved file is a real config layer: re-resolving picks the new route up.
   assert.equal(normalizeConfig({}, root).decision.provider, 'deepseek-account', 'defaults still apply when the layer is cleared')
   // Preparing the waiting skill from the panel shows its progress in plain words.

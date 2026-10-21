@@ -8,6 +8,7 @@ import { join } from 'node:path'
 
 process.env.ENG_PROTOCOL_RETRY_BASE_MS = '1'
 const { CompileJobs, PRIORITY } = await import('../lib/compile-jobs.js')
+const { partKey, skillIdentity, skillKey } = await import('../lib/compile-jobs.js')
 const { compileSkill, compileStatusFor, forgetAgent, graphFor, memoryStore, prepareAllSkills, prepareSkill, refreshSkills, settleCompiles, stopCompiles, wantSkill } = await import('../lib/compiler.js')
 const { extractPart, extractPrompt, lineReader } = await import('../lib/extract.js')
 const { streamModel } = await import('../lib/model.js')
@@ -149,6 +150,40 @@ test('one malformed line costs only itself; an answer with nothing readable is b
   const prose = fakeLlm(() => 'I think the skill says you must do it.')
   await assert.rejects(extractPart(prose, route, { skill: { name: 'x' }, document, part, statements: statementsOf(document, part) }, { timeoutMs: 5000 }),
     (error) => error.kind === 'bad-output')
+})
+
+test('truncation after the final obligation still completes relations with original source and stable ids', async () => {
+  const document = parseSkillSource({ name: 'migration', content: '# Migration\nTake a snapshot.\nRun the migration only after taking a snapshot.' })
+  const part = document.parts[0]
+  const llm = fakeLlm((prompt, index) => {
+    if (index === 0) return { text: '{"id":"backup","s":[2,2]}\n{"id":"migrate","s":[3,3]}\n', finish: 'max-tokens' }
+    assert.match(prompt, /"id":"backup"/)
+    assert.match(prompt, /Run the migration only after taking a snapshot/)
+    assert.match(prompt, /EARLIER SOURCE/)
+    return '{"rel":"requires","from":"backup","to":"migrate","s":[3,3]}\n{"end":true}'
+  })
+  const records = await extractPart(llm, route, { skill: { name: 'migration' }, document, part, statements: statementsOf(document, part) })
+  assert.equal(llm.prompts.length, 2)
+  assert.equal(records.obligations.length, 2)
+  assert.deepEqual(records.relations, [{ rel: 'requires', from: 'backup', to: 'migrate', s: [3, 3] }])
+})
+
+test('a prompt-version upgrade keeps the legacy compile guarding while new parts are prepared', async () => {
+  const source = { name: 'legacy', path: '/skills/legacy/SKILL.md', content: '# Legacy\nYou must preserve the contract.' }
+  const document = parseSkillSource(source)
+  const store = memoryStore()
+  const legacyKey = 'old-skill-key'
+  await store.saveLatest(skillIdentity(source), legacyKey)
+  await store.saveSkillRecord(legacyKey, { ...source, compiledAt: '2026-01-01' })
+  await store.savePart(partKey(document.parts[0], 1), { obligations: [{ id: 'contract', s: [2, 2], on: ['edit'] }], relations: [] })
+  const jobs = new CompileJobs({ store, llm: () => fakeLlm(prompt => answer(prompt)) })
+  try {
+    assert.notEqual(partKey(document.parts[0]), partKey(document.parts[0], 1))
+    const old = await jobs.previous(source, skillKey(source, document.content))
+    assert.equal(old.cards.length, 1)
+    assert.equal(old.cards[0].quote, 'You must preserve the contract.')
+    assert.equal(old.compiledAt, '2026-01-01')
+  } finally { await jobs.stop() }
 })
 
 test('a call that goes silent is cut off; a call that keeps streaming never is', async () => {

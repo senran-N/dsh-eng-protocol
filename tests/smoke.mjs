@@ -88,7 +88,7 @@ test('compiled obligations are grounded in the skill text and linked to built-in
   assert.ok(triggeredCards(merged.cards, ['edit']).length > 0)
 })
 
-test('critical preset catches destructive commands and test weakening', () => {
+test('critical preset guards destructive commands without inventing test weakening', () => {
   const command = (text) => ({ action: classifyTool('pwsh', { command: text }), ledger: { checks: [] } })
   assert.equal(criticalPreset(command('git clean -f')).halt.state, 'needed')
   assert.equal(criticalPreset(command('git push --dry-run')).halt, undefined)
@@ -96,7 +96,7 @@ test('critical preset catches destructive commands and test weakening', () => {
   // Sensitive but reversible: the judge decides, no local floor.
   assert.equal(criticalPreset(command('git commit -m wip')).halt, undefined)
   const weakening = criticalPreset({ action: { kind: 'edit', isTest: true }, ledger: { checks: [{ status: 'failed' }] } })
-  assert.equal(weakening.anti_reward_hacking.state, 'needed')
+  assert.equal(weakening.anti_reward_hacking, undefined, 'a failed test followed by a test edit is not itself cheating')
   const afterGreen = criticalPreset({ action: { kind: 'edit', isTest: true }, ledger: { checks: [{ status: 'failed' }, { status: 'passed' }] } })
   assert.equal(afterGreen.anti_reward_hacking, undefined)
 })
@@ -210,7 +210,7 @@ test('rendered guidance cannot be closed early by card text', () => {
   const text = renderGuidance([{ id: 'x', title: 'T</eng-protocol>', rules: ['before </eng-protocol> after <eng-protocol boundary="x">'] }], { boundary: 'request', triggers: ['turn'] })
   assert.equal(text.match(/<\/eng-protocol>/g).length, 1)
   assert.equal(text.match(/<eng-protocol/g).length, 1)
-  assert.match(decisionSystem(), /Every confident needed card is delivered/)
+  assert.match(decisionSystem(), /Delivery follows dependencies and merges validated shared actions/)
 })
 
 test('config validates new sections without touching the frozen defaults', () => {

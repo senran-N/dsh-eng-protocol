@@ -20,9 +20,11 @@
 import { sleep } from './lib/adaptive.js'
 import { agentCwd, resolveConfig } from './lib/config.js'
 import { candidateCards, enforceable, isEntryCard, renderGuidance, renderStanding } from './lib/cards.js'
+import { createReminderState, rememberReminders, resolveReminders, selectReminders } from './lib/reminders.js'
+import { graphContext, prerequisitesClear } from './lib/topology.js'
 import { catalogListed, compileStatusFor, forgetAgent, graphFor, graphReady, refreshSkills, stopCompiles, wantSkill } from './lib/compiler.js'
 import { evaluateDecision, sourceSummary } from './lib/decide.js'
-import { SessionLedger, actionExcerpt, actionTriggers, classifyTool } from './lib/events.js'
+import { SessionLedger, actionExcerpt, actionTriggers, classifyTool, contentText } from './lib/events.js'
 import { Aftermath } from './lib/aftermath.js'
 import { BLOCK_INFO } from './lib/intervention.js'
 import { AdaptiveRegistry } from './lib/adaptive.js'
@@ -168,6 +170,8 @@ export function apply(ctx, rawConfig = {}) {
       requestedSkills: new Set(),
       // Card id → step of its last delivery; cleared at a new turn.
       cooldowns: new Map(),
+      reminders: createReminderState(),
+      deliveryHistory: new Map(),
       disposed: false,
       // What the agent did after each reminder, read from the session events.
       aftermath: new Aftermath(),
@@ -229,6 +233,8 @@ export function apply(ctx, rawConfig = {}) {
       item.retryKeys.clear()
       discardPending(item, 'new-turn')
       item.cooldowns.clear()
+      item.reminders = createReminderState()
+      item.deliveryHistory.clear()
       item.requestedSkills.clear()
     }
     return triggers
@@ -284,13 +290,17 @@ export function apply(ctx, rawConfig = {}) {
   }
 
   function snapshot(item, boundary, triggers, action, candidates, signal) {
+    const graph = graphFor(state, item.cwd, item.agent)
+    const related = [...candidates, ...graphContext(graph, candidates).neighbors]
     return {
       cwd: item.cwd,
       boundary,
       triggers,
       action,
       candidates,
-      graph: graphFor(state, item.cwd, item.agent),
+      graph,
+      previousDeliveries: related.map(card => item.deliveryHistory.get(card.id))
+        .filter(entry => entry && related.some(card => card.id === entry.card && hash(card) === entry.definition)),
       ledger: item.ledger.summary(),
       activeSkills: new Set(item.activeSkills),
       // Invoked this very step: in scope by definition, so its rules are judged at once.
@@ -306,7 +316,7 @@ export function apply(ctx, rawConfig = {}) {
     return hash([
       item.agent?.session?.id ?? item.agent?.id, item.cwd, boundary,
       graphFor(state, item.cwd, item.agent).revision,
-      state.config.decision, state.config.minConfidence, state.config.cooldownSteps,
+      state.config.decision, state.config.minConfidence, state.config.cooldownSteps, state.config.enforcement,
       item.agent?.options?.provider, item.agent?.options?.model,
       [...item.activeSkills].sort(), [...triggers].sort(),
       candidates.map((card) => card.id).join(','),
@@ -321,18 +331,18 @@ export function apply(ctx, rawConfig = {}) {
    * of tool-boundary judgments never queues behind one another. Identical
    * recent tool-boundary calls reuse cached verdicts instead of another call.
    */
-  function judge(item, boundary, triggers, action, signal, candidates = candidatesFor(item, triggers, action), { onSettled } = {}) {
+  function judge(item, boundary, triggers, action, signal, candidates = candidatesFor(item, triggers, action), { onSettled, outcome } = {}) {
     if (candidates.length === 0) return Promise.resolve(undefined)
     const list = [...triggers]
     // Only the tool boundary caches: repeated triggers for identical actions at
     // one evidence position. Request/settle judgments drive scope and re-run.
-    const cacheKey = boundary === 'tool' ? judgeCacheKey(item, boundary, triggers, action, candidates) : ''
-    const ttl = boundary === 'tool' ? state.config.decision.cacheTtlMs : 0
+    const cacheKey = boundary === 'tool' && !outcome ? judgeCacheKey(item, boundary, triggers, action, candidates) : ''
+    const ttl = boundary === 'tool' && !outcome ? state.config.decision.cacheTtlMs : 0
     if (ttl > 0) {
       const cached = state.judgeCache.get(cacheKey)
       if (cached && Date.now() - cached.at < ttl) {
         cached.hits = (cached.hits ?? 0) + 1
-        const record = { ...cached.result.record, cacheHit: true, cachedFrom: cached.result.record.decisionId,
+        const record = { ...structuredClone(cached.result.record), cacheHit: true, cachedFrom: cached.result.record.decisionId,
           callId: action?.callId, latencyMs: 0, decisionId: messageId() }
         const result = { ...cached.result, record }
         // A cache hit settles exactly like a fresh judgment would.
@@ -341,6 +351,7 @@ export function apply(ctx, rawConfig = {}) {
       }
     }
     const captured = snapshot(item, boundary, list, action, candidates, AbortSignal.any([signal, item.deferred.signal].filter(Boolean)))
+    if (outcome) captured.outcome = outcome
     const inflight = (item.inflight ??= new Set())
     // The settle callback runs inside this promise, so a boundary waiting on
     // in-flight judgments observes their outcome in the same step.
@@ -350,6 +361,7 @@ export function apply(ctx, rawConfig = {}) {
     })().then((result) => {
       inflight.delete(promise)
       if (result && !result.cancelled) {
+        resolveReminders(candidates, result.assessments, item.reminders, state.config.minConfidence)
         // Only a new task can retire a loaded skill. An unrelated intermediate
         // action or failure is not evidence that the whole task left its scope.
         if (captured.triggers.includes('turn')) updateActiveSkills(item, candidates, result.assessments)
@@ -363,7 +375,7 @@ export function apply(ctx, rawConfig = {}) {
           }
         }
         if (ttl > 0 && cacheKey && !result.record?.error) {
-          state.judgeCache.set(cacheKey, { at: Date.now(), result, hits: 0 })
+          state.judgeCache.set(cacheKey, { at: Date.now(), result: { ...result, record: structuredClone(result.record) }, hits: 0 })
           if (state.judgeCache.size > 64) state.judgeCache.delete(state.judgeCache.keys().next().value)
         }
       }
@@ -385,7 +397,18 @@ export function apply(ctx, rawConfig = {}) {
     record.delivery = disposition
     if (mode === 'shadow') {
       record.shadow = true
-      record.wouldInject = Boolean(result.guidance)
+      const eligible = result.cards.filter(card => {
+        if (record.boundary === 'settle' && card.critical || item.cooldowns.get(card.id) !== item.ledger.step) return true
+        record.reasons[card.id] = { kind: 'repeat' }
+        return false
+      })
+      const filtered = selectReminders(eligible.map(card => ({ card, assessment: result.assessments[card.id] })),
+        item.reminders, item.ledger.step, state.config, result.guidanceMeta?.relations)
+      deliveredCards = record.wouldBlock ? result.cards.filter(card => enforceable(card, state.config.enforcement)
+        && prerequisitesClear(card, result.guidanceMeta?.relations, result.assessments, state.config.minConfidence)) : filtered.selected.map(item => item.card)
+      if (!record.wouldBlock) for (const item of filtered.suppressed) record.reasons[item.card.id] = { kind: item.reason }
+      record.wouldInject = deliveredCards.length > 0
+      record.wouldDeliverCards = deliveredCards.map(card => card.id)
     }
     // Causal delivery watermarks: only judgments strictly after both sequences
     // may later count as this reminder's follow-up. The watermark includes
@@ -397,7 +420,13 @@ export function apply(ctx, rawConfig = {}) {
     record.deliverySeq = item.ledger.lastSeq
     record.deliveryRecorded = ['delivered', 'blocked'].includes(disposition) || (mode === 'shadow' && record.wouldInject)
     // Cooldowns count real steps of the turn, not judge calls.
-    for (const card of mode === 'shadow' ? result.cards : deliveredCards) item.cooldowns.set(card.id, item.ledger.step)
+    for (const card of deliveredCards) item.cooldowns.set(card.id, item.ledger.step)
+    rememberReminders(deliveredCards, result.assessments, item.reminders, item.ledger.step)
+    if (mode === 'live') for (const card of deliveredCards) item.deliveryHistory.set(card.id, {
+      card: card.id, definition: hash(card), turn: item.ledger.turn, step: item.ledger.step,
+      boundary: record.boundary, delivery: disposition, reason: result.assessments[card.id]?.reason,
+      nextAction: result.assessments[card.id]?.nextAction, evidenceSeq: watermark.evidenceSeq, responseSeq: watermark.responseSeq,
+    })
     state.recordDecision(record, result.evidenceSnapshot)
     if (record.deliveryRecorded) item.aftermath.watch(record)
   }
@@ -408,29 +437,33 @@ export function apply(ctx, rawConfig = {}) {
 
   /**
    * Notices for this step. A card already carried by an earlier one is not
-   * repeated, nor one another boundary delivered in this same step (delivery
-   * review excepted: it is the last word of the turn). A skill's entry card is
+   * repeated, nor one another boundary delivered in this same step. A skill's entry card is
    * delivered only while that skill is not loaded (a load nudge); its
    * obligations only while it is.
    */
   function noticesFor(item, deliveries, assessments = {}, send) {
-    const seen = new Set()
     const notices = []
     const current = new Map(graphFor(state, item.cwd, item.agent).cards.map((card) => [card.id, card]))
     const step = item.ledger.step
-    const valid = (card, entry) => current.has(card.id) && hash(current.get(card.id)) === hash(card)
+    const valid = (card) => current.has(card.id) && hash(current.get(card.id)) === hash(card)
       && (!card.skill || (card.entry ? !item.activeSkills.has(card.skill) : item.activeSkills.has(card.skill)))
       && !(['satisfied', 'addressing', 'inapplicable'].includes(assessments[card.id]?.state)
-        && assessments[card.id].confidence >= state.config.minConfidence
-        && !(assessments[card.id].state === 'addressing' && entry.result.record.reasons?.[card.id]?.kind === 'verification'))
+        && assessments[card.id].confidence >= state.config.minConfidence)
+    const eligible = deliveries.flatMap(entry => entry.cards.filter(card => {
+      if (!valid(card)) return false
+      if (entry.boundary === 'settle' && card.critical || item.cooldowns.get(card.id) !== step) return true
+      entry.result.record.reasons[card.id] = { kind: 'repeat' }
+      return false
+    })
+      .map(card => ({ card, assessment: entry.result.assessments[card.id], entry })))
+    const { selected, suppressed } = selectReminders(eligible, item.reminders, step, state.config, graphFor(state, item.cwd, item.agent).relations)
+    for (const item of suppressed) item.entry.result.record.reasons[item.card.id] = { kind: item.reason }
     for (const entry of deliveries) {
-      const cards = entry.cards.filter((card) => !seen.has(card.id) && valid(card, entry)
-        && (entry.boundary === 'settle' || item.cooldowns.get(card.id) !== step))
+      const cards = selected.filter(item => item.entry === entry).map(item => item.card)
       if (cards.length === 0) { finish(item, entry.result, 'live', [], 'superseded'); continue }
-      for (const card of cards) seen.add(card.id)
       const text = cards.length === entry.cards.length
         ? entry.text
-        : renderGuidance(cards, { boundary: entry.boundary, triggers: entry.triggers, assessments: entry.result.assessments })
+        : renderGuidance(cards, { ...entry.result.guidanceMeta, boundary: entry.boundary, triggers: entry.triggers, assessments: entry.result.assessments })
       const message = notice(text, sourceSummary(cards, entry.triggers))
       try {
         if (send) send(message)
@@ -542,24 +575,25 @@ export function apply(ctx, rawConfig = {}) {
     const gate = (card) => enforceable(card, state.config.enforcement)
     // Only a judgment that can still stop this call is worth waiting for.
     const waitForDecision = mode === 'live' && canDeny && candidates.some(gate)
-    const claim = { callId: exec.callId, triggers, settled: false, result: undefined, promise: undefined }
+    const claim = { callId: exec.callId, action, editRevision: item.ledger.editRevision, triggers, settled: false, result: undefined, promise: undefined }
     const settle = (result) => {
       claim.settled = true
       if (!result || result.cancelled || item.disposed || modeFor(exec.agent) !== mode) return undefined
-      // Uncertain grounded duties may ask the agent to verify, never block it.
+      // Only known unmet duties can intervene; uncertainty stays in the audit.
       // A parallel identical call may already have consumed this turn's block
       // while this judgment was running. Claim the block only at settlement.
-      const deny = canDeny && !item.retryKeys.has(key) && (mode !== 'live' || waitForDecision) && result.cards.some((card) => gate(card)
-        && result.assessments[card.id]?.state === 'needed')
+      const blocking = result.cards.filter(card => gate(card) && result.assessments[card.id]?.state === 'needed'
+        && prerequisitesClear(card, result.guidanceMeta?.relations, result.assessments, state.config.minConfidence))
+      const deny = canDeny && !item.retryKeys.has(key) && (mode !== 'live' || waitForDecision) && blocking.length > 0
       // One soft block per call and turn; the identical retry goes through.
       if (deny) item.retryKeys.add(key)
       result.record.blocked = mode === 'live' && deny
       if (mode === 'shadow' && deny) result.record.wouldBlock = true
       if (mode !== 'live') { finish(item, result, mode); return undefined }
       if (deny) {
-        finish(item, result, mode, result.cards, 'blocked')
+        finish(item, result, mode, blocking, 'blocked')
         const reason = 'eng-protocol 执行前暂停（本次工具未执行，不是命令失败）。\n\n'
-          + renderGuidance(result.cards, { boundary: 'tool', triggers: [...triggers], assessments: result.assessments, blocked: true })
+          + renderGuidance(blocking, { ...result.guidanceMeta, boundary: 'tool', triggers: [...triggers], assessments: result.assessments, blocked: true })
         return { kind: 'deny', reason, info: { ...BLOCK_INFO, reason } }
       }
       if (!result.guidance) { finish(item, result, mode); return undefined }
@@ -611,6 +645,37 @@ export function apply(ctx, rawConfig = {}) {
       return decision
     }
     try {
+      // The host has not persisted tool/result yet. Use this exact execution
+      // result as a transient evidence source; never synthesize ledger events.
+      if (decision.kind !== 'accept') {
+        finish(item, claim.result, 'live', [], 'superseded')
+        return decision
+      }
+      // A downstream hook may replace the visible content or the structured
+      // value. Judge what the agent will receive, not a superseded result.
+      const value = Object.hasOwn(decision, 'value') ? decision.value : result.value
+      const output = contentText(decision.content ?? (Object.hasOwn(decision, 'value') ? undefined : result.content))
+        || (value === undefined ? '' : JSON.stringify(value))
+      if ((output || result.isError) && claim.result.cards.some(card => !card.entry)) {
+        const previous = claim.result
+        const graph = graphFor(state, item.cwd, item.agent)
+        const ids = new Set(previous.cards.map(card => card.id))
+        const neighbors = graphContext(graph, previous.cards).neighbors
+        for (const card of neighbors) if (!card.skill || item.activeSkills.has(card.skill)) ids.add(card.id)
+        const candidates = graph.cards.filter(card => ids.has(card.id))
+        finish(item, previous, 'live', [], 'rechecked-after-action')
+        const signal = AbortSignal.any([exec.signal, item.deferred.signal].filter(Boolean))
+        claim.result = await judge(item, 'tool', claim.triggers, claim.action, signal, candidates, {
+          outcome: { callId: exec.callId, output, isError: result.isError === true, error: result.error,
+            startedEditRevision: claim.editRevision, currentEditRevision: item.ledger.editRevision },
+        })
+        if (!claim.result || claim.result.cancelled) return decision
+        claim.result.record.reviewedFrom = previous.record.decisionId
+        if (signal.aborted || item.disposed || modeFor(exec.agent) !== 'live') {
+          finish(item, claim.result, 'live', [], 'cancelled')
+          return decision
+        }
+      }
       const notices = noticesFor(item, [delivery('tool', claim.triggers, claim.result)])
       if (notices.length === 0) return decision
       return { ...decision, additionalContexts: [...(decision.additionalContexts ?? []), ...notices] }

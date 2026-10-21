@@ -6,7 +6,7 @@
   "description": "Event-driven engineering protocol guidance for DeepSeek Harness: compiles skills into decision cards, judges them at the moment of action, and shows every trigger in the transcript and on a dashboard.",
   "main": "index.js",
   "scripts": {
-    "test": "node tests/smoke.mjs && node tests/compiler.mjs && node tests/compile.mjs && node tests/integration.mjs && node tests/client.mjs && node tests/scenarios.mjs && node tests/regressions.mjs && node tests/evidence.mjs && node tests/runtime-review.mjs && node tests/adaptive.mjs && node tests/catalog.mjs && node tests/audit.mjs && node tests/dashboard-browser.mjs"
+    "test": "node tests/smoke.mjs && node tests/reminders.mjs && node tests/topology.mjs && node tests/compiler.mjs && node tests/compile.mjs && node tests/integration.mjs && node tests/client.mjs && node tests/scenarios.mjs && node tests/regressions.mjs && node tests/evidence.mjs && node tests/runtime-review.mjs && node tests/reliability.mjs && node tests/adaptive.mjs && node tests/catalog.mjs && node tests/audit.mjs && node tests/dashboard-browser.mjs"
   },
   "exports": {
     ".": "./index.js",

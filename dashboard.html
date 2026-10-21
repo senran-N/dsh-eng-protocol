@@ -220,10 +220,10 @@
   var OUTCOME = { injected: ['提醒了', 'sel'], blocked: ['拦下了', 'warn'], shadow: ['影子模式·本会提醒', 'plain'], failed: ['出错', 'bad'], quiet: ['没提醒', 'plain'] };
   var STATE = { needed: ['需要提醒', 'warn'], addressing: ['正在做', 'sel'], satisfied: ['已做到', 'ok'], inapplicable: ['不相关', 'plain'], unknown: ['看不出来', 'plain'] };
   var STATE_ORDER = { needed: 0, addressing: 1, unknown: 2, satisfied: 3, inapplicable: 4 };
-  var RESULT = { selected: '提醒了', verification: '完成情况待核对，已提醒', cooldown: '刚提醒过，先不重复', limit: '—', prerequisite: '要先完成前一步', confidence: '把握不够，没提醒', covered: '已有相同的提醒', scope: '这个 skill 与当前任务无关', state: '—' };
+  var RESULT = { selected: '选中待投递', verification: '完成情况待核对，已提醒', cooldown: '刚提醒过，先不重复', repeat: '相同义务和证据已提醒', limit: '本步普通提醒已达上限', prerequisite: '要先完成前一步', arbitrated: '例外条件已成立', confidence: '把握不够，没提醒', covered: '已有相同的提醒', scope: '这个 skill 与当前任务无关', state: '—' };
   var TRIGGER = {
     turn: '新的请求', read: '读文件', edit: '改代码', first_edit: '第一次改代码', test_edit: '改测试',
-    check_start: '开始跑检查', checked: '检查跑完', failed: '出错', stuck: '反复出错', dependency: '涉及依赖',
+    command: '执行命令', check_start: '开始跑检查', checked: '检查跑完', failed: '出错', stuck: '反复出错', dependency: '涉及依赖',
     untrusted: '可疑内容', skill: '用到 skill', settle: '准备交付', heartbeat: '定期复查', risky: '危险操作',
     research: '查资料', delegate: '交给子任务',
   };
@@ -637,8 +637,11 @@
     });
   }
   // One line in plain words: when, where, what happened, and why.
+  function deliveredIds(r){
+    return r.shadow ? (r.wouldDeliverCards || r.selected || []) : (r.deliveredCards || r.selected || []);
+  }
   function headline(r){
-    var o = outcomeOf(r), titles = (r.selected || []).map(function(id){ return '「' + cardTitle(id) + '」'; });
+    var o = outcomeOf(r), titles = deliveredIds(r).map(function(id){ return '「' + cardTitle(id) + '」'; });
     if(o === 'blocked') return '拦下了一步操作' + (titles.length ? '：' + titles.join('') : '');
     if(o === 'injected') return '提醒了' + titles.join('');
     if(o === 'shadow') return (r.wouldBlock ? '本会拦下' : '本会提醒') + titles.join('');
@@ -647,7 +650,7 @@
     return '本次未选出提醒';
   }
   function why(r){
-    var a = r.assessments || {}, first = (r.selected || [])[0];
+    var a = r.assessments || {}, first = deliveredIds(r)[0];
     if(first && a[first] && a[first].reason) return a[first].reason;
     if(outcomeOf(r) === 'failed') return String(r.error || '').split('：').slice(1).join('：');
     return '';
@@ -671,17 +674,21 @@
     return '<div class="scroll"><table class="assess"><thead><tr><th>规则</th><th>判断</th><th class="num">把握</th><th>结果</th><th>原因</th></tr></thead><tbody>'
       + rows.map(function(row){
           var label = STATE[row.a.state] || [row.a.state || '—', 'plain'], result = RESULT[row.r.kind] || '—';
+          if(row.picked && row.r.kind === 'selected') result = '已送达（影子模式为预计送达）';
           if(row.r.kind === 'prerequisite' && row.r.by) result = '要先完成「' + cardTitle(row.r.by) + '」';
+          if(row.r.kind === 'arbitrated' && row.r.by) result = '适用「' + cardTitle(row.r.by) + '」的例外';
           var citations = (row.a.evidence || []).map(function(c){
             var source = (evidence || []).find(function(item){ return item.ref === c.ref; });
             return '<div class="muted">[' + esc(c.ref) + '] ' + esc(c.quote || '') + (source && source.callId ? ' ' + trajectoryLink(source.callId, '轨迹') : '') + '</div>';
           }).join('');
-          return '<tr' + (row.picked ? ' class="picked"' : '') + '><td title="' + esc(row.id) + '">' + esc(cardTitle(row.id)) + '</td><td>' + pill(label[0], label[1]) + '</td><td class="num">' + esc(percent(row.a.confidence)) + '</td><td>' + esc(result) + '</td><td class="reason">' + esc(row.a.reason || '—') + citations + '</td></tr>';
+          return '<tr' + (row.picked ? ' class="picked"' : '') + '><td title="' + esc(row.id) + '">' + esc(cardTitle(row.id)) + '</td><td>' + pill(label[0], label[1]) + '</td><td class="num">' + esc(percent(row.a.confidence)) + '</td><td>' + esc(result) + '</td><td class="reason">' + esc(row.a.reason || '—') + (row.a.nextAction ? '<div>下一步：' + esc(row.a.nextAction) + '</div>' : '') + citations + '</td></tr>';
         }).join('') + '</tbody></table></div>';
   }
   function decisionDetail(r){
     var meta = [];
     if(r.turn != null) meta.push('第 ' + esc(r.turn) + ' 轮对话');
+    if(r.stage === 'after-action') meta.push('工具结果复核');
+    if(r.judgeRevision) meta.push('版本 ' + esc(r.judgeRevision));
     if(r.triggers && r.triggers.length) meta.push('因为' + esc(trigs(r.triggers)));
     meta.push('用时 ' + esc(seconds(r.latencyMs)));
     if(r.model) meta.push('<span title="检查用的模型">' + esc(r.model) + '</span>');
@@ -689,12 +696,13 @@
     var html = '<div class="muted" style="font-size:12px">' + meta.join(' · ') + (flags ? ' ' + flags : '') + (r.callId ? ' · ' + trajectoryLink(r.callId) : '') + '</div>';
     if(r.error) html += '<div class="err" style="margin-top:6px">' + esc(r.error) + '</div>';
     if(r.judgeCoverage) html += '<div class="muted">规则共 ' + num(r.judgeCoverage.total) + ' 条 · 已回答 ' + num(r.judgeCoverage.answered) + ' · 未完成或无效 ' + num(r.judgeCoverage.unresolved) + ' · 已判定范围外、未展开 ' + num(r.judgeCoverage.scopeSkipped) + '</div>';
+    if(r.recoveredAssessments) html += '<div class="muted">从截断或超时响应中保留了 ' + num(r.recoveredAssessments) + ' 条完整判断，其余仍按实际完成情况记录。</div>';
     if(r.evidenceError) html += '<div class="err">证据快照未保存：' + esc(r.evidenceError) + '</div>';
     if(r.cacheHit) html += '<div class="muted">复用相同证据与动作的缓存判断；以下执行记录来自原判断，本次未重新调用模型。</div>';
     if(r.attempts && r.attempts.length){
       var phaseNames = { initial: '首次判断', expanded: '展开义务', review: '复核', repair: '补查无效判断' }, stages = { queue: '排队', model: '模型执行', budget: '总时限已用尽' };
       html += '<h4>等待与执行</h4><div class="muted">总时限 ' + esc(seconds(r.deadlineMs)) + '，输入 ' + num(r.inputChars) + ' 字符</div>';
-      html += r.attempts.map(function(a){ return '<div class="muted">' + esc(phaseNames[a.phase] || a.phase) + ' · ' + (a.cards || []).length + ' 条 · 排队 ' + esc(seconds(a.queueMs)) + ' · 执行 ' + esc(seconds(a.runMs)) + ' · ' + esc(stages[a.timeoutStage] || ({ answered: '已回答', invalid: '格式有误', failed: '失败', cancelled: '已取消', 'not-started': '未开始' }[a.status]) || a.status) + '</div>'; }).join('');
+      html += r.attempts.map(function(a){ return '<div class="muted">' + esc(phaseNames[a.phase] || a.phase) + ' · ' + (a.cards || []).length + ' 条 · 排队 ' + esc(seconds(a.queueMs)) + ' · 执行 ' + esc(seconds(a.runMs)) + ' · ' + esc(stages[a.timeoutStage] || ({ answered: '已回答', partial: '保留了部分完整回答', invalid: '格式有误', failed: '失败', cancelled: '已取消', 'not-started': '未开始' }[a.status]) || a.status) + (a.maxTokens ? ' · 输出上限 ' + num(a.maxTokens) + ' tokens' : '') + '</div>'; }).join('');
       var understandings = r.attempts.filter(function(a){ return a.understanding; });
       html += '<h4>判官如何理解任务</h4>' + (understandings.length ? understandings.map(function(a){
         var u = a.understanding;
@@ -705,7 +713,15 @@
     if(r.evidenceCoverage) html += '<div class="muted">历史窗口外：' + num(r.evidenceCoverage.omittedTools || 0) + ' 次工具、' + num(r.evidenceCoverage.omittedChecks || 0) + ' 条检查、' + num(r.evidenceCoverage.omittedTimeline || 0) + ' 条事件；未包含的记录不能证明未完成。</div>';
     if(r.citationCoverage && r.citationCoverage.uncited) html += '<div class="muted">' + num(r.citationCoverage.uncited) + ' 条判断没有提供证据引用，当前仅有模型结论可供核对。</div>';
     html += stepsHtml(r.after);
-    var selected = r.selected || [], as = r.assessments || {}, reasons = r.reasons || {};
+    var edges = Object.values(r.edgeDecisions || {});
+    if(edges.length) html += '<h4>关系如何影响提醒</h4>' + edges.map(function(edge){
+      var status = { applies: '条件成立', inapplicable: '条件不适用', unknown: '依据不足，保留独立规则' }[edge.state] || '未判明';
+      var citations = (edge.evidence || []).map(function(item){ return '[' + item.ref + '] ' + item.quote; }).join('；');
+      return '<div class="reply"><b>' + esc(cardTitle(edge.source)) + ' → ' + esc(cardTitle(edge.target)) + '</b><div>'
+        + esc((edge.type === 'fuses' ? '共同动作' : '例外裁决') + ' · ' + status) + '</div><div>' + esc(edge.reason || '')
+        + '</div>' + (edge.action ? '<div>动作：' + esc(edge.action) + '</div>' : '') + '<div class="muted">' + esc(citations) + '</div></div>';
+    }).join('');
+    var selected = deliveredIds(r), as = r.assessments || {}, reasons = r.reasons || {};
     var rows = (r.candidates || []).map(function(id){ return { id: id, a: as[id] || {}, r: reasons[id] || {}, picked: selected.indexOf(id) >= 0 }; });
     var rank = function(s){ return STATE_ORDER[s] == null ? 9 : STATE_ORDER[s]; };
     rows.sort(function(x, y){ return Number(y.picked) - Number(x.picked) || rank(x.a.state) - rank(y.a.state) || (y.a.confidence || 0) - (x.a.confidence || 0); });
@@ -893,7 +909,7 @@
 
   // ---- topology --------------------------------------------------------------------------
   function relationClass(type){ return type === 'contains' ? 'contains' : type === 'covers' ? 'covers' : type === 'fuses' || type === 'arbitrates' ? 'merge' : 'order'; }
-  var RELATION = { requires: '要先完成', blocks: '完成后才轮到', covers: '与通用规则相同', arbitrates: '冲突时参考', fuses: '可以合并参考', contains: '属于' };
+  var RELATION = { requires: '要先完成', blocks: '条件解除后继续', covers: '完整覆盖同一义务', arbitrates: '按条件裁决例外', fuses: '可用共同动作完成', contains: '属于' };
   function renderGraph(){
     var d = state.data, root = $('graph'), wrap = $('graphwrap');
     state.graphDirty = false; root.replaceChildren();
@@ -1093,7 +1109,8 @@
       + '<div class="field"><label for="set-skills-exclude">不用这些</label><input id="set-skills-exclude" type="text" value="' + esc((e.skills.exclude || []).join(', ')) + '" placeholder="skill-a, skill-b"></div></div></div>'
       + '<div class="card"><div class="card-head"><h2>提醒的方式</h2></div><div class="card-body fields">'
       + '<div class="field"><label for="set-runtime-minConfidence">多有把握才提醒</label><div class="unit"><input id="set-runtime-minConfidence" type="number" min="0" max="100" step="5" value="' + esc(Math.round(r.minConfidence * 100)) + '"><i>%</i></div><div class="hint">越高提醒越少</div></div>'
-      + '<div class="field"><label for="set-runtime-cooldownSteps">同一条提醒至少隔几次检查</label><input id="set-runtime-cooldownSteps" type="number" min="0" max="100" step="1" value="' + esc(r.cooldownSteps) + '"><div class="hint">0 表示不限制</div></div>'
+      + '<div class="field"><label for="set-runtime-cooldownSteps">同一条普通提醒至少隔几步</label><input id="set-runtime-cooldownSteps" type="number" min="0" max="100" step="1" value="' + esc(r.cooldownSteps) + '"><div class="hint">相同证据不重复；0 仅关闭步数冷却</div></div>'
+      + '<div class="field"><label for="set-runtime-maxRemindersPerStep">每步普通提醒上限（可选）</label><input id="set-runtime-maxRemindersPerStep" type="number" min="0" max="20" step="1" value="' + esc(r.maxRemindersPerStep == null ? '' : r.maxRemindersPerStep) + '"><div class="hint">默认留空，不按条数裁剪；按依赖、证据和共同动作组织提醒。0 关闭普通提醒，关键拦截仍有效。</div></div>'
       + '<div class="field"><label for="set-runtime-heartbeatSteps">每隔几步复查一次</label><input id="set-runtime-heartbeatSteps" type="number" min="0" max="100" step="1" value="' + esc(r.heartbeatSteps) + '"><div class="hint">0 表示不复查</div></div>'
       + '<label class="switch"><input type="checkbox" id="set-runtime-builtinCards"' + (r.builtinCards ? ' checked' : '') + '>使用通用规则（关掉后只用 skill 里的规则）</label></div></div>'
       + '</div>';
@@ -1123,7 +1140,7 @@
     return {
       decision: decision, compiler: compiler,
       skills: { include: list('set-skills-include'), exclude: list('set-skills-exclude') },
-      runtime: { minConfidence: minc == null ? null : minc / 100, cooldownSteps: number('set-runtime-cooldownSteps'), heartbeatSteps: number('set-runtime-heartbeatSteps'), builtinCards: $('set-runtime-builtinCards').checked },
+      runtime: { minConfidence: minc == null ? null : minc / 100, cooldownSteps: number('set-runtime-cooldownSteps'), maxRemindersPerStep: number('set-runtime-maxRemindersPerStep'), heartbeatSteps: number('set-runtime-heartbeatSteps'), builtinCards: $('set-runtime-builtinCards').checked },
     };
   }
   async function saveSettings(){

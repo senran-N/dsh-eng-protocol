@@ -1,0 +1,360 @@
+{
+  "capturedAt": "2026-10-21T09:13:53.587Z",
+  "files": [
+    {
+      "file": "decisions.jsonl.1",
+      "parsed": 383,
+      "invalid": 0
+    },
+    {
+      "file": "decisions.jsonl",
+      "parsed": 218,
+      "invalid": 0
+    }
+  ],
+  "note": "Retained logs only; errors include partial judgments. Revision cohorts may contain different tasks and are not a controlled A/B comparison.",
+  "all": {
+    "count": 318,
+    "firstAt": "2026-10-21T04:19:42.099Z",
+    "lastAt": "2026-10-21T09:13:52.252Z",
+    "errorsOrIncomplete": 301,
+    "deadlineExpired": 291,
+    "cacheHits": 0,
+    "recoveredAssessments": 0,
+    "outputExpansions": 0,
+    "models": {
+      "opendesign/deepseek-v4.1-flash": 318
+    },
+    "candidateCount": {
+      "count": 318,
+      "min": 2,
+      "p50": 41,
+      "p90": 157,
+      "max": 159
+    },
+    "answeredRatio": {
+      "count": 318,
+      "min": 0,
+      "p50": 0.025477707006369428,
+      "p90": 0.6942148760330579,
+      "max": 1
+    },
+    "totalAttempts": 14079,
+    "startedAttempts": 1783,
+    "attemptErrors": {
+      "timeout": 13198,
+      "truncated": 262,
+      "bad-output": 1
+    },
+    "timeoutStages": {
+      "budget": 9836,
+      "queue": 2460,
+      "model": 902
+    },
+    "batchSizes": {
+      "1": 1633,
+      "2": 10,
+      "3": 15,
+      "4": 4,
+      "5": 3,
+      "6": 1,
+      "7": 2,
+      "8": 2,
+      "9": 1,
+      "10": 8,
+      "11": 4,
+      "13": 1,
+      "14": 12,
+      "15": 16,
+      "16": 9,
+      "18": 2,
+      "21": 5,
+      "22": 1,
+      "23": 10,
+      "24": 25,
+      "33": 3,
+      "36": 5,
+      "37": 1,
+      "38": 10
+    },
+    "successfulCallMs": {
+      "count": 573,
+      "min": 3279,
+      "p50": 6897,
+      "p90": 10015,
+      "max": 19575
+    },
+    "requestChars": {
+      "count": 1783,
+      "min": 14388,
+      "p50": 65376,
+      "p90": 132891,
+      "max": 332999
+    },
+    "outputAllowances": {}
+  },
+  "last200": {
+    "count": 200,
+    "firstAt": "2026-10-21T06:48:47.796Z",
+    "lastAt": "2026-10-21T09:13:52.252Z",
+    "errorsOrIncomplete": 199,
+    "deadlineExpired": 191,
+    "cacheHits": 0,
+    "recoveredAssessments": 0,
+    "outputExpansions": 0,
+    "models": {
+      "opendesign/deepseek-v4.1-flash": 200
+    },
+    "candidateCount": {
+      "count": 200,
+      "min": 4,
+      "p50": 41,
+      "p90": 158,
+      "max": 159
+    },
+    "answeredRatio": {
+      "count": 200,
+      "min": 0,
+      "p50": 0.024390243902439025,
+      "p90": 0.17073170731707318,
+      "max": 1
+    },
+    "totalAttempts": 11610,
+    "startedAttempts": 1305,
+    "attemptErrors": {
+      "timeout": 10951,
+      "truncated": 206,
+      "bad-output": 1
+    },
+    "timeoutStages": {
+      "budget": 8493,
+      "queue": 1812,
+      "model": 646
+    },
+    "batchSizes": {
+      "1": 1305
+    },
+    "successfulCallMs": {
+      "count": 442,
+      "min": 4565,
+      "p50": 6898,
+      "p90": 9817,
+      "max": 19575
+    },
+    "requestChars": {
+      "count": 1305,
+      "min": 37568,
+      "p50": 60568,
+      "p90": 124615,
+      "max": 255252
+    },
+    "outputAllowances": {}
+  },
+  "revisions": {
+    "unversioned": {
+      "count": 318,
+      "firstAt": "2026-10-21T04:19:42.099Z",
+      "lastAt": "2026-10-21T09:13:52.252Z",
+      "errorsOrIncomplete": 301,
+      "deadlineExpired": 291,
+      "cacheHits": 0,
+      "recoveredAssessments": 0,
+      "outputExpansions": 0,
+      "models": {
+        "opendesign/deepseek-v4.1-flash": 318
+      },
+      "candidateCount": {
+        "count": 318,
+        "min": 2,
+        "p50": 41,
+        "p90": 157,
+        "max": 159
+      },
+      "answeredRatio": {
+        "count": 318,
+        "min": 0,
+        "p50": 0.025477707006369428,
+        "p90": 0.6942148760330579,
+        "max": 1
+      },
+      "totalAttempts": 14079,
+      "startedAttempts": 1783,
+      "attemptErrors": {
+        "timeout": 13198,
+        "truncated": 262,
+        "bad-output": 1
+      },
+      "timeoutStages": {
+        "budget": 9836,
+        "queue": 2460,
+        "model": 902
+      },
+      "batchSizes": {
+        "1": 1633,
+        "2": 10,
+        "3": 15,
+        "4": 4,
+        "5": 3,
+        "6": 1,
+        "7": 2,
+        "8": 2,
+        "9": 1,
+        "10": 8,
+        "11": 4,
+        "13": 1,
+        "14": 12,
+        "15": 16,
+        "16": 9,
+        "18": 2,
+        "21": 5,
+        "22": 1,
+        "23": 10,
+        "24": 25,
+        "33": 3,
+        "36": 5,
+        "37": 1,
+        "38": 10
+      },
+      "successfulCallMs": {
+        "count": 573,
+        "min": 3279,
+        "p50": 6897,
+        "p90": 10015,
+        "max": 19575
+      },
+      "requestChars": {
+        "count": 1783,
+        "min": 14388,
+        "p50": 65376,
+        "p90": 132891,
+        "max": 332999
+      },
+      "outputAllowances": {}
+    }
+  },
+  "examples": [
+    {
+      "decisionId": "9c4787cf-3028-4d59-a8ff-05ad00d0b205",
+      "ts": "2026-10-21T09:12:00.952Z",
+      "boundary": "tool",
+      "candidates": 4,
+      "coverage": {
+        "total": 4,
+        "answered": 3,
+        "unresolved": 1,
+        "scopeSkipped": 0
+      },
+      "deadlineMs": 20000,
+      "latencyMs": 16433,
+      "firstAttempts": [
+        {
+          "cards": 1,
+          "inputChars": 66033,
+          "runMs": 7214,
+          "queueMs": 0,
+          "timeoutMs": 19999,
+          "status": "answered"
+        },
+        {
+          "cards": 1,
+          "inputChars": 62998,
+          "runMs": 16431,
+          "queueMs": 0,
+          "timeoutMs": 19999,
+          "status": "failed",
+          "errorKind": "truncated"
+        },
+        {
+          "cards": 1,
+          "inputChars": 45527,
+          "runMs": 7357,
+          "queueMs": 0,
+          "timeoutMs": 19998,
+          "status": "answered"
+        }
+      ]
+    },
+    {
+      "decisionId": "dd44e752-d1b9-4fd5-961e-fba0a0e94c35",
+      "ts": "2026-10-21T09:13:10.288Z",
+      "boundary": "tool",
+      "candidates": 41,
+      "coverage": {
+        "total": 41,
+        "answered": 7,
+        "unresolved": 34,
+        "scopeSkipped": 0
+      },
+      "deadlineMs": 20000,
+      "latencyMs": 20007,
+      "firstAttempts": [
+        {
+          "cards": 1,
+          "inputChars": 66418,
+          "runMs": 6397,
+          "queueMs": 0,
+          "timeoutMs": 19999,
+          "status": "answered"
+        },
+        {
+          "cards": 1,
+          "inputChars": 63383,
+          "runMs": 7841,
+          "queueMs": 0,
+          "timeoutMs": 19999,
+          "status": "failed",
+          "errorKind": "truncated"
+        },
+        {
+          "cards": 1,
+          "inputChars": 45912,
+          "runMs": 8341,
+          "queueMs": 0,
+          "timeoutMs": 19999,
+          "status": "answered"
+        }
+      ]
+    },
+    {
+      "decisionId": "cb6e61b7-f554-4cdf-9185-61056603acea",
+      "ts": "2026-10-21T09:13:52.252Z",
+      "boundary": "tool",
+      "candidates": 41,
+      "coverage": {
+        "total": 41,
+        "answered": 8,
+        "unresolved": 33,
+        "scopeSkipped": 0
+      },
+      "deadlineMs": 20000,
+      "latencyMs": 20013,
+      "firstAttempts": [
+        {
+          "cards": 1,
+          "inputChars": 69906,
+          "runMs": 8199,
+          "queueMs": 0,
+          "timeoutMs": 19999,
+          "status": "answered"
+        },
+        {
+          "cards": 1,
+          "inputChars": 66871,
+          "runMs": 14435,
+          "queueMs": 0,
+          "timeoutMs": 19998,
+          "status": "failed",
+          "errorKind": "truncated"
+        },
+        {
+          "cards": 1,
+          "inputChars": 49400,
+          "runMs": 16115,
+          "queueMs": 0,
+          "timeoutMs": 19998,
+          "status": "answered"
+        }
+      ]
+    }
+  ]
+}

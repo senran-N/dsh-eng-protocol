@@ -129,7 +129,7 @@ function createHost({ skills = [], config = {}, cardOverrides = {} } = {}) {
     },
     preStep: (agent, messages = []) => on('agent/pre-step')({ agent, messages, step: nextStep(agent, messages), signal: signal() }, async () => ({ kind: 'enter', messages })),
     preExec: (agent, name, args, callId) => on('tools/pre-execute')({ agent, name, arguments: args, callId, signal: signal() }, async () => ({ kind: 'allow' })),
-    postExec: (agent, name, args, callId, result = { isError: false, content: [] }) => on('tools/post-execute')({ agent, name, arguments: args, callId, signal: signal() }, result, async () => ({ kind: 'accept' })),
+    postExec: (agent, name, args, callId, result = { isError: false, content: [] }, downstream = { kind: 'accept' }) => on('tools/post-execute')({ agent, name, arguments: args, callId, signal: signal() }, result, async () => downstream),
     settle: (agent, turn) => on('agent/turn-stopping')({ agent, turn, signal: signal() }),
     emit: (agent, event) => on('session/event')(agent.session, event),
     dispose: (agent) => on('agent/disposed')({ agent }),
@@ -271,7 +271,7 @@ test('skill advice preserves real shell output and repeated echo calls never bec
   await host.ready(agent)
   host.verdict = (id) => ({ state: id === entryOf('postgres') ? 'needed' : 'unknown' })
   await host.preStep(agent, [user('数据库迁移')])
-  // Next step permits a fresh reminder; the original load request persists.
+  // The original load recommendation remains in context across steps.
   await host.preStep(agent)
   const output = { isError: false, content: [{ type: 'text', text: 'ok\n[exit code: 0]' }] }
   const original = structuredClone(output)
@@ -282,12 +282,7 @@ test('skill advice preserves real shell output and repeated echo calls never bec
     assert.deepEqual(output, original)
     assert.equal(post.content, undefined, 'plugin must not override the original tool output')
     assert.equal(post.kind, 'accept')
-    if (i === 0) {
-      const text = post.additionalContexts[0].content[0].text
-      assert.match(text, /独立协议提醒/)
-      assert.match(text, /不表示工具失败或输出丢失/)
-      assert.match(text, /加载 skill：postgres/)
-    }
+    assert.equal(post.additionalContexts, undefined, 'unchanged load advice must not be attached to every command')
   }
   assert.ok(!(await host.decisions()).some((record) => record.blocked))
   host.dispose(agent)
@@ -320,7 +315,7 @@ test('runtime discovery leads through native skill loading to grounded requireme
   host.dispose(agent)
 })
 
-test('new failures recheck active obligations and bypass cooldown, while quiet steps stay quiet', async () => {
+test('failures recheck active obligations without replaying unchanged reminders', async () => {
   const host = createHost({ skills: ['postgres'], config: { cooldownSteps: 10 } })
   const agent = host.agent('repeated-failure')
   await host.ready(agent)
@@ -334,7 +329,8 @@ test('new failures recheck active obligations and bypass cooldown, while quiet s
     return host.preStep(agent)
   }
   assert.match(noticeText(await fail('f1')), /\[card: skill_postgres_s1/, 'even an edit-only obligation is rechecked after failure')
-  assert.match(noticeText(await fail('f2')), /\[card: skill_postgres_s1/, 'fresh failure evidence bypasses cooldown')
+  assert.doesNotMatch(noticeText(await fail('f2')), /\[card: skill_postgres_s1/, 'another failed call does not bypass ordinary cooldown')
+  assert.ok(host.calls.at(-1).ids.includes('skill_postgres_s1'), 'the duty is still judged and recorded')
   const before = host.calls.length
   assert.equal(noticeText(await host.preStep(agent)), '')
   assert.equal(host.calls.length, before, 'no unconditional polling')
@@ -354,7 +350,7 @@ test('an ignored load request follows the next ordinary command and clears when 
   await host.postExec(agent, 'pwsh', retryArgs, 'migrate-retry')
   const retryRecord = (await host.decisions()).find((record) => record.callId === 'migrate-retry')
   assert.equal(retryRecord.cacheHit, true)
-  assert.equal(retryRecord.delivery, 'superseded')
+  assert.equal(retryRecord.reasons[entryOf('postgres')].kind, 'cooldown')
   assert.equal(retryRecord.deliveryRecorded, false, 'an undelivered cached duplicate must not open a new follow-up watcher')
   await host.load(agent, 'postgres')
   assert.equal((await host.preExec(agent, 'pwsh', { command: 'node migrate.js --apply' }, 'loaded')).kind, 'allow')
@@ -418,7 +414,7 @@ test('a failed edit target stays available to file-scoped skill recovery', async
   assert.match(noticeText(await host.preStep(agent)), /skill_postgres_s1/, 'a failed edit is not in filesEdited, but its path still scopes recovery')
 })
 
-test('uncertain grounded duties get an explicit verification reminder at delivery, never an action block', async () => {
+test('uncertain grounded duties stay in the audit without recovery or delivery checklists', async () => {
   const host = createHost({ skills: ['postgres'], cardOverrides: { postgres: { s1: { triggers: ['edit', 'settle'], checkpoint: true } } } })
   const agent = host.agent('verify-unknown')
   await host.ready(agent)
@@ -431,13 +427,12 @@ test('uncertain grounded duties get an explicit verification reminder at deliver
   const args = { path: 'db/001.sql' }
   assert.equal((await host.preExec(agent, 'edit', args, 'uncertain')).kind, 'allow', 'unknown never blocks a checkpoint')
   const post = await host.postExec(agent, 'edit', args, 'uncertain')
-  assert.match(post.additionalContexts[0].content[0].text, /核对提醒，不是已发生违规的结论/, 'failure recovery advice rides the result without blocking')
+  assert.equal(post.additionalContexts, undefined, 'unknown is not a reason to make the agent verify every duty')
   await host.settle(agent, 1)
   const text = agent.injected.map((message) => message.content[0].text).join('\n')
-  assert.match(text, /skill_postgres_s1/)
-  assert.match(text, /核对提醒，不是已发生违规的结论/)
+  assert.equal(text, '')
   const record = (await host.decisions()).find((record) => record.boundary === 'settle')
-  assert.equal(record.reasons.skill_postgres_s1.kind, 'verification')
+  assert.equal(record.reasons.skill_postgres_s1.kind, 'state')
   assert.equal(record.assessments.skill_postgres_s1.state, 'unknown', 'record keeps the actual uncertain assessment')
 })
 
@@ -456,7 +451,7 @@ test('heartbeat and delivery rediscover missed skills; a heartbeat also rechecks
   host.verdict = (id) => ({ state: [entryOf('xlsx'), entryOf('pdf')].includes(id) ? 'needed' : 'unknown' })
   await host.settle(agent, 1)
   assert.match(agent.injected.map((message) => message.content[0].text).join('\n'), /加载 skill：xlsx/)
-  assert.match(agent.injected.map((message) => message.content[0].text).join('\n'), /加载 skill：pdf/, 'an ignored load is reconsidered at delivery despite cooldown')
+  assert.doesNotMatch(agent.injected.map((message) => message.content[0].text).join('\n'), /加载 skill：pdf/, 'delivery does not repeat unchanged advice')
 })
 
 test('routing on an intermediate action cannot retire a loaded skill for the whole task', async () => {
@@ -580,9 +575,10 @@ test('standing context carries the loaded skills\' verified requirements, checkp
   assert.equal(host.standing(agent), '', 'shadow mode never touches the conversation')
 })
 
-test('a grounded skill checkpoint blocks the matching action once; one without a source never exists', async () => {
+test('explicitly enabled skill checkpoints block once; one without a source never exists', async () => {
   const host = createHost({
     skills: ['postgres'],
+    config: { enforcement: { skillCheckpoints: true } },
     cardOverrides: { postgres: { s1: { checkpoint: true, paths: ['**/*.sql'] }, s7: { checkpoint: true, quote: 'Never an invented sentence.' } } },
   })
   const agent = host.agent('A')
@@ -653,7 +649,7 @@ test('cooldowns count real steps of the turn, not judge calls', async () => {
   fail('f2')
   assert.doesNotMatch(noticeText(await host.preStep(agent)), /\[card: thrashing\]/, 'step 3: still cooling down')
   fail('f3')
-  assert.match(noticeText(await host.preStep(agent)), /\[card: thrashing\]/, 'step 4: due again')
+  assert.doesNotMatch(noticeText(await host.preStep(agent)), /\[card: thrashing\]/, 'step 4: cooldown elapsed but the evidence is unchanged')
 })
 
 test('a deferred reminder does not swallow the next step\'s own triggers', async () => {
@@ -879,7 +875,7 @@ test('fresh completion evidence withdraws a queued obsolete reminder', async () 
   assert.ok((await host.decisions()).some((record) => record.delivery === 'superseded' && !record.injected))
 })
 
-test('deferred and fresh notices deliver every needed card exactly once, with no count cap', async () => {
+test('deferred and fresh notices share the delivery budget and do not repeat a card', async () => {
   const host = createHost()
   const agent = host.agent('cap')
   host.verdict = (id, call) => ({ state: call.boundary === 'tool' && id === 'verify' || call.boundary === 'request' && call.triggers.includes('failed') && ['thrashing', 'verify'].includes(id) ? 'needed' : 'unknown' })
@@ -959,6 +955,131 @@ test('a recompiled rule cannot reuse a cached verdict for the previous definitio
   await host.preExec(agent, 'write', args, 'new-rule')
   await host.postExec(agent, 'write', args, 'new-rule')
   assert.ok(host.calls.length > before, 'a new graph requires a new judgment even when card ids stay stable')
+})
+
+test('many needed skill rules share three reminder slots across parallel tools and final review', async () => {
+  const overrides = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`s${i + 1}`, { triggers: ['edit', 'settle'] }]))
+  const host = createHost({ skills: ['quiet'], config: { builtinCards: false, maxRemindersPerStep: 3 }, cardOverrides: { quiet: overrides } })
+  host.skillOverrides = { quiet: { content: bodyOf('quiet', 12) } }
+  const agent = host.agent('many-rules')
+  await host.ready(agent)
+  await host.preStep(agent, [user('Implement the change')])
+  await host.load(agent, 'quiet')
+  await host.compiled(agent, 'quiet', 12)
+  host.verdict = id => ({ state: isEntry(id) ? 'addressing' : 'needed' })
+  const calls = ['one', 'two'].map(callId => ({ callId, args: { path: `${callId}.js`, content: 'change' } }))
+  await Promise.all(calls.map(call => host.preExec(agent, 'write', call.args, call.callId)))
+  const posts = await Promise.all(calls.map(call => host.postExec(agent, 'write', call.args, call.callId)))
+  const text = posts.flatMap(post => post.additionalContexts ?? []).map(message => message.content[0].text).join('\n')
+  assert.equal([...text.matchAll(/\[card:/g)].length, 3, 'parallel calls share a real-step budget')
+  await host.settle(agent, 1)
+  assert.equal(agent.injected.length, 0, 'final review does not reset that budget')
+  const records = (await host.decisions()).filter(record => record.boundary === 'tool')
+  assert.ok(records.some(record => sectionsOf('quiet', Object.keys(record.assessments)).length === 12), 'all duties remain judged')
+  assert.equal(records.reduce((sum, record) => sum + record.deliveredCards.length, 0), 3)
+  assert.ok(records.some(record => Object.values(record.reasons).some(reason => reason.kind === 'limit')))
+  host.dispose(agent)
+})
+
+test('default skill checkpoints neither pause the tool nor wait for the judge', async () => {
+  const host = createHost({ skills: ['quiet'], config: { builtinCards: false }, cardOverrides: { quiet: { s1: { checkpoint: true } } } })
+  const agent = host.agent('advisory-checkpoint')
+  await host.ready(agent)
+  await host.load(agent, 'quiet')
+  await host.compiled(agent, 'quiet')
+  host.verdict = id => ({ state: id === 'skill_quiet_s1' ? 'needed' : 'unknown' })
+  let release
+  host.gate = new Promise(resolve => { release = resolve })
+  const args = { path: 'app.js', content: 'change' }
+  try {
+    const allowed = await Promise.race([host.preExec(agent, 'write', args, 'work'), sleep(200).then(() => ({ kind: 'waited' }))])
+    assert.equal(allowed.kind, 'allow', 'workflow advice must run alongside the tool')
+  } finally { release() }
+  const post = await host.postExec(agent, 'write', args, 'work')
+  assert.match(post.additionalContexts[0].content[0].text, /skill_quiet_s1/)
+  assert.ok(!(await host.decisions()).some(record => record.blocked))
+  host.dispose(agent)
+})
+
+test('scope advice does not stop an edit, while shadow mode uses the same reminder budget', async () => {
+  const host = createHost()
+  const agent = host.agent('scope-advice')
+  await host.preStep(agent, [user('Implement the requested fix')])
+  host.verdict = id => ({ state: id === 'scope' ? 'needed' : 'unknown' })
+  const args = { path: 'app.js', content: 'fix' }
+  assert.equal((await host.preExec(agent, 'write', args, 'edit')).kind, 'allow')
+  await host.postExec(agent, 'write', args, 'edit')
+  assert.ok(!(await host.decisions()).some(record => record.blocked))
+  host.dispose(agent)
+
+  const shadow = createHost({ config: { shadow: true, maxRemindersPerStep: 3 } })
+  const observer = shadow.agent('shadow-budget')
+  const ordinary = new Set(BUILTIN_CARDS.filter(card => !card.critical).map(card => card.id))
+  shadow.verdict = id => ({ state: ordinary.has(id) ? 'needed' : 'unknown' })
+  assert.equal(noticeText(await shadow.preStep(observer, [user('Implement a fix')])), '')
+  const record = (await shadow.decisions()).find(record => record.wouldInject)
+  assert.equal(record.wouldDeliverCards.length, 3)
+  assert.equal(record.injected, false)
+  shadow.dispose(observer)
+})
+
+test('completed tools retract pre-execution advice; a failed tool retains its real output and receives a concrete recovery action', async () => {
+  const host = createHost({ skills: ['quiet'], config: { builtinCards: false }, cardOverrides: { quiet: { s1: { triggers: ['command'] } } } })
+  const agent = host.agent('post-review')
+  await host.ready(agent)
+  await host.load(agent, 'quiet')
+  await host.compiled(agent, 'quiet')
+  const args = { command: 'node validate.js' }
+  const id = 'skill_quiet_s1'
+  host.verdict = (card, call) => {
+    if (card !== id) return { state: 'unknown' }
+    const outcome = call.evidence.outcome
+    return outcome ? { state: outcome.isError ? 'needed' : 'satisfied', nextAction: 'Repair the missing fixture',
+      evidence: [{ ref: 'outcome:current', quote: outcome.output }] } : { state: 'needed', nextAction: 'Run validation' }
+  }
+  assert.equal((await host.preExec(agent, 'shell', args, 'pass')).kind, 'allow')
+  const passed = await host.postExec(agent, 'shell', args, 'pass', { content: 'Validation passed', isError: false })
+  assert.equal(passed.additionalContexts, undefined, 'the just-completed validation must withdraw the queued reminder')
+  const afterPass = host.calls.find(call => call.evidence.outcome?.output === 'Validation passed')
+  assert.equal(afterPass.evidence.stage, 'after-action')
+  assert.equal(afterPass.evidence.previousDeliveries.length, 0, 'an unshipped verdict is not a past delivery')
+  await host.preStep(agent)
+  await host.preExec(agent, 'shell', args, 'fail')
+  const raw = { content: [{ type: 'text', text: 'Missing fixture: api.json' }], isError: true }
+  const failed = await host.postExec(agent, 'shell', args, 'fail', raw)
+  assert.equal(failed.kind, 'accept')
+  assert.equal(failed.content, undefined, 'advice never replaces the actual tool content')
+  assert.equal(raw.content[0].text, 'Missing fixture: api.json')
+  assert.match(failed.additionalContexts[0].content[0].text, /Repair the missing fixture/)
+  const records = await host.decisions()
+  const completion = records.find(record => record.stage === 'after-action' && record.assessments[id]?.state === 'satisfied')
+  assert.ok(completion.reviewedFrom)
+  assert.equal(completion.injected, false)
+  await host.preStep(agent)
+  await host.preExec(agent, 'shell', args, 'again')
+  await host.postExec(agent, 'shell', args, 'again')
+  const latest = host.calls.at(-1)
+  assert.ok(latest.evidence.previousDeliveries.some(delivery => delivery.card === id && delivery.nextAction === 'Repair the missing fixture'))
+  host.dispose(agent)
+})
+
+test('post-action review follows replacement values and never overrides another hook block', async () => {
+  const host = createHost({ skills: ['quiet'], config: { builtinCards: false }, cardOverrides: { quiet: { s1: { triggers: ['command'] } } } })
+  const agent = host.agent('replacement-review')
+  await host.ready(agent)
+  await host.load(agent, 'quiet')
+  await host.compiled(agent, 'quiet')
+  host.verdict = (id, call) => ({ state: id !== 'skill_quiet_s1' ? 'unknown' : call.evidence.outcome ? 'satisfied' : 'needed' })
+  const args = { command: 'node validate.js' }
+  await host.preExec(agent, 'shell', args, 'replace')
+  await host.postExec(agent, 'shell', args, 'replace', { content: 'STALE_RESULT', isError: false }, { kind: 'accept', value: { verified: true } })
+  assert.equal(host.calls.at(-1).evidence.outcome.output, '{"verified":true}')
+  await host.preStep(agent)
+  await host.preExec(agent, 'shell', args, 'blocked-elsewhere')
+  const downstream = { kind: 'block', feedback: 'Other hook blocked' }
+  const returned = await host.postExec(agent, 'shell', args, 'blocked-elsewhere', { content: 'done' }, downstream)
+  assert.equal(returned, downstream)
+  host.dispose(agent)
 })
 
 let failed = 0

@@ -25,8 +25,8 @@ test('entry routing does not send thousands of unselected membership edges', () 
   const prompt = decisionPrompt({ ledger: {}, graph: { relations } }, [entry])
   assert.ok(prompt.length < 5000, `an entry-only prompt grew to ${prompt.length} characters`)
   const rulePrompt = decisionPrompt({ ledger: {}, graph: { relations } }, [{ id: 'rule_0' }])
-  const sent = JSON.parse(rulePrompt.split('RELATIONS (missing endpoints are not proof of completion):\n')[1].split('\n\nASSESSMENTS')[0])
-  assert.deepEqual(sent, [relations[0], relations.at(-1)], 'the selected duty keeps membership and prerequisite context')
+  const sent = JSON.parse(rulePrompt.split('RELATIONS (missing endpoints are not proof of completion):\n')[1].split('\n\nRELATED RULES')[0])
+  assert.deepEqual(sent.map(({ id, ...edge }) => edge), [relations[0], relations.at(-1)], 'the selected duty keeps membership and prerequisite context')
 })
 
 test('decision records measure actual batch prompts and retain their graph evidence', async () => {

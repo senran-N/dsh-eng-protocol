@@ -150,7 +150,7 @@ test('candidate closure judges prerequisites even when only the dependent event 
   const states = { skill_demo_read: { state: 'satisfied', confidence: 0.9 }, skill_demo_ship: needed }
   assert.deepEqual(selectAssessments(states, candidates, merged.relations, config, tracker()).selected.map((item) => item.id), ['skill_demo_ship'])
   states.skill_demo_read.confidence = 0.1
-  assert.equal(selectAssessments(states, candidates, merged.relations, config, tracker()).selected.length, 0)
+  assert.equal(selectAssessments(states, candidates, merged.relations, config, tracker()).selected.length, 1, 'unknown prerequisites do not hide a known unmet duty')
   const prompt = decisionPrompt({ graph: merged, ledger: {}, triggers: ['settle'] }, candidates)
   assert.match(prompt, /Check the actual behavior/)
   assert.match(prompt, /requires/)

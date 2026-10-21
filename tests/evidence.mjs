@@ -92,7 +92,9 @@ test('skill scope, grounding, reminders and standing context retain conditions b
   const condition = long('Except when the user explicitly waives this check.')
   const entry = entryCard({ name: 'demo', description: condition, whenToUse: condition })
   assert.ok(entry.when.includes(condition))
-  assert.ok(renderGuidance([entry], { boundary: 'request', triggers: ['turn'] }).includes(condition))
+  const loadAdvice = renderGuidance([entry], { boundary: 'request', triggers: ['turn'] })
+  assert.match(loadAdvice, /加载 skill：demo/)
+  assert.ok(!loadAdvice.includes(condition), 'load advice points to the full native skill instead of repeating its catalog description')
   const quotes = Array.from({ length: 9 }, (_, index) => `Requirement ${index}: ${condition}`)
   const skill = { name: 'demo', content: quotes.join('\n'), path: '/skills/demo/SKILL.md', hash: 'long' }
   const compiled = normalizeCompiled({ cards: quotes.map((quote, index) => ({ id: `r${index}`, title: `r${index}`, quote, when: 'editing', triggers: ['edit'], rules: ['Perform the required check'], satisfiedWhen: 'check completed' })), relations: [] }, skill)

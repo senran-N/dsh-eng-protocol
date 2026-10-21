@@ -10,7 +10,8 @@ const counts = values => Object.fromEntries([...values.reduce((map, value) => ma
   .sort((a, b) => b[1] - a[1]))
 const quantiles = values => {
   const sorted = values.filter(Number.isFinite).sort((a, b) => a - b)
-  return { count: sorted.length, min: sorted[0], p50: sorted[Math.floor(sorted.length * 0.5)],
+  return { count: sorted.length, mean: sorted.length ? Math.round(sorted.reduce((n, v) => n + v, 0) / sorted.length) : undefined,
+    min: sorted[0], p50: sorted[Math.floor(sorted.length * 0.5)],
     p90: sorted[Math.floor(sorted.length * 0.9)], max: sorted.at(-1) }
 }
 const files = [], decisions = []
@@ -34,6 +35,7 @@ function summarize(rows) {
     errorsOrIncomplete: rows.filter(row => row.error).length,
     deadlineExpired: rows.filter(row => row.deadlineExpired).length,
     cacheHits: rows.filter(row => row.cacheHit).length,
+    decisionMs: quantiles(rows.map(row => row.latencyMs)),
     recoveredAssessments: rows.reduce((n, row) => n + (row.recoveredAssessments ?? 0), 0),
     outputExpansions: rows.reduce((n, row) => n + (row.outputExpansions ?? 0), 0),
     models: counts(rows.map(row => row.model ?? 'unknown')),
@@ -44,6 +46,11 @@ function summarize(rows) {
     timeoutStages: counts(attempts.filter(attempt => attempt.timeoutStage).map(attempt => attempt.timeoutStage)),
     batchSizes: counts(started.map(attempt => attempt.cards?.length ?? 0)),
     successfulCallMs: quantiles(attempts.filter(attempt => attempt.status === 'answered').map(attempt => attempt.runMs)),
+    callMs: quantiles(started.map(attempt => attempt.runMs)),
+    prepareMs: quantiles(started.map(attempt => attempt.prepareMs)),
+    firstChunkMs: quantiles(started.map(attempt => attempt.firstChunkMs)),
+    firstTextMs: quantiles(started.map(attempt => attempt.firstTextMs)),
+    generationMs: quantiles(started.map(attempt => attempt.generationMs)),
     requestChars: quantiles(attempts.map(attempt => attempt.inputChars)),
     outputAllowances: counts(attempts.filter(attempt => attempt.maxTokens).map(attempt => attempt.maxTokens)),
   }

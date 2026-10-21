@@ -63,6 +63,7 @@ await appendDecision(config, {
   evidence: [{ ref: 'event:2', callId: 'browser-call', preview: 'All checks passed' }],
   assessments: { verify: { state: 'satisfied', confidence: 0.9, reason: 'Checked the latest edit', evidence: [{ ref: 'event:2', quote: 'All checks passed' }] } },
   attempts: [{ phase: 'initial', cards: ['verify'], status: 'answered', queueMs: 20, runMs: 110,
+    prepareMs: 10, firstChunkMs: 25, firstTextMs: 60, generationMs: 50,
     understanding: { goal: '修复解析器并保留断言', constraints: ['不得削弱测试'], phase: '验证', remaining: ['交付报告'], sourceRefs: ['request:1'] } },
     { phase: 'review', cards: ['verify'], status: 'failed', queueMs: 0, runMs: 370, timeoutStage: 'model' }],
 }, { evidence: { input: { user: '完整任务条件在末尾：保留所有断言。', timeline: [{ ref: 'event:2', text: 'All checks passed' }] }, cards: [], references: [] } })
@@ -116,6 +117,7 @@ try {
   await until(async () => await evaluate("document.querySelectorAll('#trail .ev-row').length === 1"), 'decision trail not rendered')
   await evaluate("document.querySelector('#trail .ev-row').click()")
   assert.match(await evaluate("document.getElementById('trail').textContent"), /判官如何理解任务/)
+  assert.match(await evaluate("document.getElementById('trail').textContent"), /首段正文/)
   assert.match(await evaluate("document.getElementById('trail').textContent"), /修复解析器并保留断言/)
   assert.match(await evaluate("document.getElementById('trail').textContent"), /模型执行/)
   assert.match(await evaluate("document.getElementById('trail').textContent"), /规则共 1 条 · 已回答 1 · 未完成或无效 0/)

@@ -6,11 +6,12 @@ import { entryCard, normalizeCompiled } from '../lib/compiler.js'
 import { renderGuidance, renderStanding } from '../lib/cards.js'
 import { classifyError, withRetry } from '../lib/adaptive.js'
 import { aggregate } from '../lib/store.js'
+import { evidenceOfPrompt } from './helpers/prompt.mjs'
 
 const long = (tail) => 'Detailed evidence.\n'.repeat(300) + tail
 const ledgerOf = (messages = []) => new SessionLedger({ session: { deriveMessages: () => messages } })
 const user = (content) => ({ role: 'user', source: { kind: 'user' }, content })
-const evidenceOf = (ledger, action) => JSON.parse(decisionPrompt({ ledger: ledger.summary(), action }, []).split('CURRENT EVIDENCE:\n')[1].split('\n\nCANDIDATE CARDS:')[0])
+const evidenceOf = (ledger, action) => evidenceOfPrompt(decisionPrompt({ ledger: ledger.summary(), action }, []))
 const result = (callId, content) => ({ type: 'tool/result', data: { message: { source: { callId }, content } } })
 
 test('live decision evidence preserves long instructions, report tails and tool conclusions', () => {

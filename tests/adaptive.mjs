@@ -234,7 +234,8 @@ test('borderline skill routing is reviewed without weakening the configured conf
 test('delivery addressing is reviewed as stopping now; a failed review keeps the original verdict', async () => {
   const card = ruleCard('skill_report_complete', { skill: 'report' })
   const llm = fakeLlm((prompt, index) => {
-    assert.match(prompt, /"stopping": true/)
+    const evidence = JSON.parse(prompt.split('CURRENT EVIDENCE:\n')[1].split('\n\nCANDIDATE CARDS:')[0])
+    assert.equal(evidence.stopping, true)
     return answer(idsOf(prompt), () => ({ state: index === 0 ? 'addressing' : 'needed', confidence: 0.9 }))
   })
   const result = await decide(llm, judgeState(), [card], { boundary: 'settle', triggers: ['settle'] })

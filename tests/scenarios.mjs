@@ -6,6 +6,7 @@ import { apply } from '../index.js'
 import { BUILTIN_CARDS } from '../lib/cards.js'
 import { slug } from '../lib/compiler.js'
 import { aggregate } from '../lib/store.js'
+import { evidenceOfPrompt } from './helpers/prompt.mjs'
 
 // End-to-end scenarios against a fake DSH host: real `apply()`, fake LLM and skills.
 const root = await mkdtemp(join(tmpdir(), 'dsh-eng-protocol-scenarios-'))
@@ -77,7 +78,7 @@ function createHost({ skills = [], config = {}, cardOverrides = {} } = {}) {
             out = [...lines, '{"end":true}'].join('\n')
           } else {
             const cards = JSON.parse(prompt.split('CANDIDATE CARDS:\n')[1].split('\n\nCritical cards')[0])
-            const evidence = JSON.parse(prompt.split('CURRENT EVIDENCE:\n')[1].split('\n\nCANDIDATE CARDS:')[0])
+            const evidence = evidenceOfPrompt(prompt)
             const call = { ids: cards.map((card) => card.id), boundary: evidence.boundary, triggers: evidence.triggers, evidence, cards }
             host.calls.push(call)
             if (host.gate) await gated(host.gate, signal)

@@ -702,7 +702,13 @@
     if(r.attempts && r.attempts.length){
       var phaseNames = { initial: '首次判断', expanded: '展开义务', review: '复核', repair: '补查无效判断' }, stages = { queue: '排队', model: '模型执行', budget: '总时限已用尽' };
       html += '<h4>等待与执行</h4><div class="muted">总时限 ' + esc(seconds(r.deadlineMs)) + '，输入 ' + num(r.inputChars) + ' 字符</div>';
-      html += r.attempts.map(function(a){ return '<div class="muted">' + esc(phaseNames[a.phase] || a.phase) + ' · ' + (a.cards || []).length + ' 条 · 排队 ' + esc(seconds(a.queueMs)) + ' · 执行 ' + esc(seconds(a.runMs)) + ' · ' + esc(stages[a.timeoutStage] || ({ answered: '已回答', partial: '保留了部分完整回答', invalid: '格式有误', failed: '失败', cancelled: '已取消', 'not-started': '未开始' }[a.status]) || a.status) + (a.maxTokens ? ' · 输出上限 ' + num(a.maxTokens) + ' tokens' : '') + '</div>'; }).join('');
+      html += r.attempts.map(function(a){
+        var timing = (a.prepareMs != null ? ' · 准备 ' + esc(seconds(a.prepareMs)) : '')
+          + (a.firstChunkMs != null ? ' · 首块 ' + esc(seconds(a.firstChunkMs)) : '')
+          + (a.firstTextMs != null ? ' · 首段正文 ' + esc(seconds(a.firstTextMs)) : '')
+          + (a.generationMs != null ? ' · 正文开始后 ' + esc(seconds(a.generationMs)) : '');
+        return '<div class="muted">' + esc(phaseNames[a.phase] || a.phase) + ' · ' + (a.cards || []).length + ' 条 · 排队 ' + esc(seconds(a.queueMs)) + ' · 执行 ' + esc(seconds(a.runMs)) + ' · ' + esc(stages[a.timeoutStage] || ({ answered: '已回答', partial: '保留了部分完整回答', invalid: '格式有误', failed: '失败', cancelled: '已取消', 'not-started': '未开始' }[a.status]) || a.status) + (a.maxTokens ? ' · 输出上限 ' + num(a.maxTokens) + ' tokens' : '') + (timing ? '<span title="首块与首段正文均从本次模型调用开始计时，包含准备时间；首块可能是推理或元数据，不能视为正文。">' + timing + '</span>' : '') + '</div>';
+      }).join('');
       var understandings = r.attempts.filter(function(a){ return a.understanding; });
       html += '<h4>判官如何理解任务</h4>' + (understandings.length ? understandings.map(function(a){
         var u = a.understanding;
